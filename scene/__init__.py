@@ -12,6 +12,10 @@
 import os
 import random
 import json
+
+import numpy as np
+
+from utils.graphics_utils import BasicPointCloud
 from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
@@ -22,7 +26,7 @@ class Scene:
 
     gaussians : GaussianModel
 
-    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0]):
+    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0], downsample_init=1.0):
         """b
         :param path: Path to colmap scene main folder.
         """
@@ -80,7 +84,15 @@ class Scene:
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"))
         else:
-            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
+            if downsample_init != 1.0:
+                num_samples = round((len(scene_info.point_cloud.points) / downsample_init))
+                idx = np.random.choice(len(scene_info.point_cloud.points), num_samples, replace=False)
+                downsampled = BasicPointCloud(points=scene_info.point_cloud.points[idx],
+                                                         colors=scene_info.point_cloud.colors[idx],
+                                                         normals=scene_info.point_cloud.normals[idx])
+                self.gaussians.create_from_pcd(downsampled, self.cameras_extent)
+            else:
+                self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
