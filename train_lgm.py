@@ -38,7 +38,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = LatentGaussianModel(dataset.sh_degree, torch.zeros((1, 3), device=torch.device('cuda')))
     # gaussians.set_freeze_structures_params(True)
-    scene = Scene(dataset, gaussians, downsample_init=8.0)
+    scene = Scene(dataset, gaussians, downsample_init=2.0)
     gaussians.training_setup(opt)
     if checkpoint:
         raise NotImplementedError()
@@ -91,7 +91,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
         gaussians.forward()
-        a = torch.zeros((4096 * 8 * 1024 ** 2 // 32), device='cuda')
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], \
         render_pkg["visibility_filter"], render_pkg["radii"]
@@ -223,10 +222,10 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[1, 100, 500, 1_000, 3_000, 7_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[1, 100, 500, 1_000, 3_000, 7_000, 30_000])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[1, 100, 500, 1_000, 3_000, 7_000, 30_000, 45_000, 60_000, 75_000, 90_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[1, 100, 500, 1_000, 3_000, 7_000, 30_000, 45_000, 60_000, 75_000, 90_000])
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[1, 100, 500, 1_000, 3_000, 7_000, 30_000])
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[1, 100, 500, 1_000, 3_000, 7_000, 30_000, 45_000, 60_000, 75_000, 90_000])
     parser.add_argument("--start_checkpoint", type=str, default=None)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)

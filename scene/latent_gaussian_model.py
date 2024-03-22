@@ -63,7 +63,7 @@ def quaternion_normalize_then_multiply(a: torch.Tensor, b: torch.Tensor) -> torc
 
 
 class LatentGaussianModel(GaussianModel, torch.nn.Module):
-    def __init__(self, sh_degree: int, structure_means_init, latent_size: int = 128,
+    def __init__(self, sh_degree: int, structure_means_init, latent_size: int = 512,
                  hidden_size: int = 2048, gaussians_per_structure: int = 16,
                  use_positional_embedding=False, positional_embedding_multires=None):
         GaussianModel.__init__(self, sh_degree)
@@ -92,12 +92,14 @@ class LatentGaussianModel(GaussianModel, torch.nn.Module):
         self.normalize_quaternion = torch.nn.functional.normalize
         if self.use_positional_embedding:
             pos_embed_fn, pos_embed_size = get_embedder()
-            self.decoder = Decoder(latent_size, [hidden_size] * 4,
+            self.decoder = Decoder(latent_size, [hidden_size] * 1,
                                    self.gaussian_parameters_size * self.gaussians_per_structure,
+                                   norm_layers=[],
                                    pos_emb_size=pos_embed_size, pos_embed_fn=pos_embed_fn).to(device)
         else:
-            self.decoder = Decoder(latent_size, [hidden_size] * 4,
-                                   self.gaussian_parameters_size * self.gaussians_per_structure).to(device)
+            self.decoder = Decoder(latent_size, [hidden_size] * 1,
+                                   self.gaussian_parameters_size * self.gaussians_per_structure,
+                                   norm_layers=[]).to(device)
 
         self.freeze_structure_means = False
         self.freeze_structure_scales = False
@@ -210,7 +212,7 @@ class LatentGaussianModel(GaussianModel, torch.nn.Module):
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-5, eps=1e-15)
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-4, eps=1e-15)
 
     def save_ply(self, path):
         with torch.no_grad():
