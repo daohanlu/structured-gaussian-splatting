@@ -214,7 +214,9 @@ class LatentGaussianModel(GaussianModel, torch.nn.Module):
 
     def save_ply(self, path):
         with torch.no_grad():
-            self.update_from_vector(self.forward())
+            self.forward()
+        # import pdb
+        # pdb.set_trace()
         super().save_ply(path)
 
 

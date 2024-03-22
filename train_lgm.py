@@ -37,7 +37,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = LatentGaussianModel(dataset.sh_degree, torch.zeros((1, 3), device=torch.device('cuda')))
-    gaussians.set_freeze_structures_params(True)
+    # gaussians.set_freeze_structures_params(True)
     scene = Scene(dataset, gaussians, downsample_init=8.0)
     gaussians.training_setup(opt)
     if checkpoint:
@@ -100,7 +100,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
-        # loss = (1.0 - opt.lambda_dssim) * Ll1
         loss.backward()
 
         iter_end.record()
