@@ -12,6 +12,7 @@
 import os
 import torch
 from random import randint
+import cv2
 
 from scene.latent_gaussian_model import LatentGaussianModel
 from utils.loss_utils import l1_loss, ssim
@@ -33,17 +34,23 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, debug_latent):
     first_iter = 0
-    tb_writer = prepare_output_and_logger(dataset)
+    tb_writer = prepare_output_and_logger(dataset, dummy=debug_latent)
     gaussians = LatentGaussianModel(dataset.sh_degree, torch.zeros((1, 3), device=torch.device('cuda')))
     # gaussians.set_freeze_structures_params(True)
-    scene = Scene(dataset, gaussians, downsample_init=2.0)
+    scene = Scene(dataset, gaussians, downsample_init=8.0)
     gaussians.training_setup(opt)
     if checkpoint:
-        raise NotImplementedError()
-        (model_params, first_iter) = torch.load(checkpoint)
-        gaussians.restore(model_params, opt)
+        # raise NotImplementedError()
+        (model_state_dict, first_iter) = torch.load(checkpoint)
+        # gaussians.restore(model_params, opt)
+        try:
+            gaussians.load_state_dict(model_state_dict)
+        except RuntimeError as e:
+            print(f'Warning: mismatched keys. Trying torch.load with strict=False\n{e}')
+            gaussians.load_state_dict(model_state_dict, strict=False)
+        gaussians.active_sh_degree = gaussians.max_sh_degree
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -55,7 +62,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_loss_for_log = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
-    for iteration in range(first_iter, opt.iterations + 1):
+    print(f'First iteration: {first_iter}; debug: {debug_latent}')
+    if debug_latent:
+        debug_iters = 10000000
+    else:
+        debug_iters = 0
+    cv2_key = -1
+    for iteration in range(first_iter, max(opt.iterations + 1, debug_iters)):
         if network_gui.conn == None:
             network_gui.try_connect()
         while network_gui.conn != None:
@@ -90,7 +103,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             pipe.debug = True
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
-        gaussians.forward()
+        if cv2_key == ord('n'):
+            latent_noise = 10.0*torch.randn((1, gaussians.latent_size), device=gaussians.structure_latents.device, dtype=gaussians.structure_latents.dtype)
+        elif cv2_key == ord('q'):
+            break
+        else:
+            latent_noise = None
+
+        gaussians.forward(latent_noise=latent_noise)
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], \
         render_pkg["visibility_filter"], render_pkg["radii"]
@@ -100,8 +120,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
         loss.backward()
-
         iter_end.record()
+
+        if debug_latent:
+            gt = gt_image.cpu().numpy().transpose(1, 2, 0)
+            rendered = torch.clip(image.detach(), 0.0, 1.0).cpu().numpy().transpose(1, 2, 0)
+            print(gt[0, 0, :])
+            print(rendered[0, 0, :])
+            # import pdb
+            # pdb.set_trace()
+            cv2.imshow("render", cv2.cvtColor(rendered, cv2.COLOR_RGB2BGR))
+            cv2.imshow("ground truth", cv2.cvtColor(gt, cv2.COLOR_RGB2BGR))
+            cv2_key = cv2.waitKey(0)
 
         with torch.no_grad():
             # Progress bar
@@ -122,17 +152,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Densification
             if iteration < opt.densify_until_iter and False:
                 # Keep track of max radii in image-space for pruning
-                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter],
-                                                                     radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
-
-                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
-
-                if iteration % opt.opacity_reset_interval == 0 or (
-                        dataset.white_background and iteration == opt.densify_from_iter):
-                    gaussians.reset_opacity()
+                # gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter],
+                #                                                      radii[visibility_filter])
+                # gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                #
+                # if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                #     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                #     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+                #
+                # if iteration % opt.opacity_reset_interval == 0 or (
+                #         dataset.white_background and iteration == opt.densify_from_iter):
+                #     gaussians.reset_opacity()
+                pass
 
             # Optimizer step
             if iteration < opt.iterations:
@@ -141,19 +172,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # print('stepped', iteration)
 
             if (iteration in checkpoint_iterations):
-                # print("\n[ITER {}] Saving Checkpoint".format(iteration))
-                # torch.save((gaussians.parameters(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
-                pass
+                print("\n[ITER {}] Saving Checkpoint".format(iteration))
+                torch.save((gaussians.state_dict(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
 
-def prepare_output_and_logger(args):
+def prepare_output_and_logger(args, dummy=False):
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
             unique_str = os.getenv('OAR_JOB_ID')
         else:
             unique_str = str(uuid.uuid4())
-        args.model_path = os.path.join("./output_lgm/", unique_str[0:10])
 
+        if dummy:
+            args.model_path = os.path.join("/tmp/3dgs_tmp/", unique_str[0:10])
+        else:
+            args.model_path = os.path.join("./output_lgm/", unique_str[0:10])
     # Set up output folder
     print("Output folder: {}".format(args.model_path))
     os.makedirs(args.model_path, exist_ok=True)
@@ -227,6 +260,7 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[1, 100, 500, 1_000, 3_000, 7_000, 30_000, 45_000, 60_000, 75_000, 90_000])
     parser.add_argument("--start_checkpoint", type=str, default=None)
+    parser.add_argument('--debug_latent', action='store_true')
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -239,7 +273,7 @@ if __name__ == "__main__":
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations,
-             args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+             args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.debug_latent)
 
     # All done
     print("\nTraining complete.")

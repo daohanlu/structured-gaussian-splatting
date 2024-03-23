@@ -92,19 +92,34 @@ class LatentGaussianModel(GaussianModel, torch.nn.Module):
         self.normalize_quaternion = torch.nn.functional.normalize
         if self.use_positional_embedding:
             pos_embed_fn, pos_embed_size = get_embedder()
-            self.decoder = Decoder(latent_size, [hidden_size] * 1,
+            self.decoder = Decoder(latent_size, [hidden_size] * 2,
                                    self.gaussian_parameters_size * self.gaussians_per_structure,
                                    norm_layers=[],
                                    pos_emb_size=pos_embed_size, pos_embed_fn=pos_embed_fn).to(device)
         else:
-            self.decoder = Decoder(latent_size, [hidden_size] * 1,
+            self.decoder = Decoder(latent_size, [hidden_size] * 2,
                                    self.gaussian_parameters_size * self.gaussians_per_structure,
                                    norm_layers=[]).to(device)
+        self.register_buffers()
 
         self.freeze_structure_means = False
         self.freeze_structure_scales = False
         self.freeze_structure_rotations = False
         self.freeze_structure_opacities = False
+
+    def register_buffers(self):
+        # register buffers so they're included in self.state_dict() when saving
+        max_sh_degree = torch.tensor(self.max_sh_degree, dtype=torch.int)
+        del self.max_sh_degree
+        self.register_buffer('max_sh_degree', max_sh_degree)
+
+        active_sh_degree = torch.tensor(self.active_sh_degree, dtype=torch.int)
+        del self.active_sh_degree
+        self.register_buffer('active_sh_degree', active_sh_degree)
+
+        max_radii2D = self.max_radii2D
+        del self.max_radii2D
+        self.register_buffer('max_radii2D', max_radii2D)
 
     def update_from_vector(self, gaussian_parameters):
         """
@@ -136,16 +151,19 @@ class LatentGaussianModel(GaussianModel, torch.nn.Module):
         self.freeze_structure_rotations = frozen
         self.freeze_structure_opacities = frozen
 
-    def forward(self) -> torch.Tensor:
+    def forward(self, latent_noise: Optional[torch.Tensor] = None) -> torch.Tensor:
 
         def flatten_structures(params, B):
             return params.reshape(B * self.gaussians_per_structure, -1)
 
         # decode gaussian parameters. self.gaussians_per_structure for each latent.
+        structure_latents = self.structure_latents
+        if latent_noise is not None:
+            structure_latents = structure_latents + latent_noise.detach()
         if self.use_positional_embedding:
-            gaussian_parameters = self.decoder(self.structure_latents, xyz=self.structure_means)
+            gaussian_parameters = self.decoder(structure_latents, xyz=self.structure_means)
         else:
-            gaussian_parameters = self.decoder(self.structure_latents)
+            gaussian_parameters = self.decoder(structure_latents)
 
         # --- compose each cluster's shared mean, scale, rotation, and opacity with its constituents ---
         B, D = gaussian_parameters.shape
