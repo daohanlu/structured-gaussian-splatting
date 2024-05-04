@@ -3,6 +3,7 @@ from typing import Optional
 import numpy as np
 import torch
 
+from utils.sh_utils import RGB2SH
 from .autodecoder import Decoder, get_embedder
 from .gaussian_model import GaussianModel
 from utils.graphics_utils import BasicPointCloud
@@ -63,8 +64,8 @@ def quaternion_normalize_then_multiply(a: torch.Tensor, b: torch.Tensor) -> torc
 
 
 class LatentGaussianModel(GaussianModel, torch.nn.Module):
-    def __init__(self, sh_degree: int, structure_means_init, latent_size: int = 512,
-                 hidden_size: int = 2048, gaussians_per_structure: int = 16,
+    def __init__(self, sh_degree: int, structure_means_init, latent_size: int = 32,
+                 hidden_size: int = 32, gaussians_per_structure: int = 8,
                  use_positional_embedding=False, positional_embedding_multires=None):
         GaussianModel.__init__(self, sh_degree)
         torch.nn.Module.__init__(self)
@@ -100,6 +101,7 @@ class LatentGaussianModel(GaussianModel, torch.nn.Module):
             self.decoder = Decoder(latent_size, [hidden_size] * 2,
                                    self.gaussian_parameters_size * self.gaussians_per_structure,
                                    norm_layers=[]).to(device)
+        # self.decoder = torch.nn.Identity()
         self.register_buffers()
 
         self.freeze_structure_means = False
@@ -127,6 +129,7 @@ class LatentGaussianModel(GaussianModel, torch.nn.Module):
         :param gaussian_parameters: Batch of pre-activation vectorized Gaussian parameters.
             (num_gaussians, 11 + color_params)
         """
+        raise NotImplementedError()
         N = gaussian_parameters.shape[0]
 
         xyz = gaussian_parameters[:, 0:3]
@@ -166,34 +169,35 @@ class LatentGaussianModel(GaussianModel, torch.nn.Module):
             gaussian_parameters = self.decoder(structure_latents)
 
         # --- compose each cluster's shared mean, scale, rotation, and opacity with its constituents ---
-        B, D = gaussian_parameters.shape
-        assert B == self.num_structures
+        K = self.gaussians_per_structure
+        D = self.gaussian_parameters_size
+        B, D_out = gaussian_parameters.shape
+        assert B == self.num_structures and D_out == K * D
         # reshape into (num clusters, num Gaussians per cluster, individual gaussian parameters)
-        gaussian_parameters = gaussian_parameters.reshape(B, self.gaussians_per_structure,
-                                                          self.gaussian_parameters_size)
-
+        gaussian_parameters = gaussian_parameters.reshape(B, K, D)
         structure_means = self.structure_means if not self.freeze_structure_means else self.structure_means.detach()
         structure_opacities = self.structure_opacities if not self.freeze_structure_opacities else self.structure_opacities.detach()
         structure_scales = self.structure_scales if not self.freeze_structure_opacities else self.structure_scales.detach()
         structure_rotations = self.structure_rotations if not self.freeze_structure_rotations else self.structure_rotations.detach()
         # add each cluster's mean to constituents
-        self._xyz = flatten_structures(gaussian_parameters[:, :, 0:3] + structure_means.unsqueeze(1), B)
-        self._opacity = flatten_structures(gaussian_parameters[:, :, 3:4] + structure_opacities.unsqueeze(1), B)
-        self._scaling = flatten_structures(gaussian_parameters[:, :, 4:7] + structure_scales.unsqueeze(1), B)
-        self._rotation = flatten_structures(quaternion_normalize_then_multiply(structure_rotations.unsqueeze(1),
-                                                                               gaussian_parameters[:, :, 7:11]), B)
-        self._features_dc = flatten_structures(gaussian_parameters[:, :, 11:11 + 3], B)
-        self._features_dc = self._features_dc.reshape(self._features_dc.shape[0], 1, 3)
-        self._features_rest = flatten_structures(gaussian_parameters[:, :, 11 + 3:11 + 3 + 45], B)
-        self._features_rest = self._features_rest.reshape(self._features_rest.shape[0], 15, 3)
-        # gaussian_parameters[:, :, 0:3] += structure_means.unsqueeze(1)
-        # # add each cluster's pre-sigmoid-activation opacity with constituents. (equiv. to a pre-activation bias)
-        # gaussian_parameters[:, :, 3:4] += structure_opacities.unsqueeze(1)
-        # # mul each cluster's scale with constituents. we use addition here since this param is in log-space
-        # gaussian_parameters[:, :, 4:7] += structure_scales.unsqueeze(1)
-        # # multiply each cluster's quaternions with constituents
-        # gaussian_parameters[:, :, 7:11] = quaternion_normalize_then_multiply(structure_rotations.unsqueeze(1),
-        #                                                                      gaussian_parameters[:, :, 7:11])
+        self._xyz = (gaussian_parameters[:, :, 0:3] + structure_means.unsqueeze(1)).flatten(0, 1)
+        self._opacity = (gaussian_parameters[:, :, 3:4] + structure_opacities.unsqueeze(1)).flatten(0, 1)
+        self._scaling = (gaussian_parameters[:, :, 4:7] + structure_scales.unsqueeze(1)).flatten(0, 1)
+        self._rotation = (quaternion_normalize_then_multiply(structure_rotations.unsqueeze(1),
+                                                             gaussian_parameters[:, :, 7:11])).flatten(0, 1)
+        # self._xyz = flatten_structures(gaussian_parameters[:, :, 0:3], B)
+        # self._opacity = flatten_structures(gaussian_parameters[:, :, 3:4], B)
+        # self._scaling = flatten_structures(gaussian_parameters[:, :, 4:7], B)
+        # self._rotation = flatten_structures(torch.nn.functional.normalize(gaussian_parameters[:, :, 7:11], dim=-1), B)
+
+        self._features_dc = gaussian_parameters[:, :, 11:11 + 3].unsqueeze(-2)  # B x K x 1 x 3
+        # print(self._features_dc.shape)
+        self._features_dc = self._features_dc.flatten(start_dim=0, end_dim=1)  # B*K x 1 x 3
+        # print(self._features_dc.shape)
+        self._features_rest = gaussian_parameters[:, :, 11 + 3:].reshape(B, K, -1, 3)  # B x K x M x 3
+        # print(self._features_rest.shape)
+        self._features_rest = self._features_rest.flatten(start_dim=0, end_dim=1)  # B*K x M x 3
+        # print(self._features_rest.shape)
 
         # reshape into (num clusters * num Gaussians per cluster, individual gaussian parameters)
         gaussian_parameters = flatten_structures(gaussian_parameters, B)
@@ -206,7 +210,7 @@ class LatentGaussianModel(GaussianModel, torch.nn.Module):
 
         self.spatial_lr_scale = spatial_lr_scale
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
-        # fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
+        fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
         # features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
         # features[:, :3, 0 ] = fused_color
         # features[:, 3:, 1:] = 0.0
@@ -223,14 +227,20 @@ class LatentGaussianModel(GaussianModel, torch.nn.Module):
         self.structure_scales = torch.nn.Parameter(scales.requires_grad_(True))
         self.structure_rotations = torch.nn.Parameter(rots.requires_grad_(True))
         self.structure_opacities = torch.nn.Parameter(opacities.requires_grad_(True))
-        self.structure_latents = torch.nn.Parameter(torch.randn((self.structure_means.shape[0], self.latent_size),
-                                                               device="cuda"))
+        del self.structure_latents
+        structure_latents = torch.randn((self.structure_means.shape[0], self.latent_size), device="cuda")
+        structure_latents[:, :3] = self.structure_means.detach().clone() * 0
+        structure_latents[:, 3:4] = self.structure_opacities.detach().clone() * 0
+        structure_latents[:, 4:7] = self.structure_scales.detach().clone() * 0
+        structure_latents[:, 7:11] = self.structure_rotations.detach().clone()
+        structure_latents[:, 11:11 + 3] = fused_color.clone()
+        self.structure_latents = torch.nn.Parameter(structure_latents)
         self.num_structures = self.structure_means.shape[0]
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-4, eps=1e-15)
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=1.0e-3/2, eps=1e-15)
 
     def save_ply(self, path):
         with torch.no_grad():

@@ -37,9 +37,10 @@ except ImportError:
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, debug_latent):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset, dummy=debug_latent)
+    assert dataset.sh_degree == 0
     gaussians = LatentGaussianModel(dataset.sh_degree, torch.zeros((1, 3), device=torch.device('cuda')))
     # gaussians.set_freeze_structures_params(True)
-    scene = Scene(dataset, gaussians, downsample_init=8.0)
+    scene = Scene(dataset, gaussians, downsample_init=1.0)
     gaussians.training_setup(opt)
     if checkpoint:
         # raise NotImplementedError()
