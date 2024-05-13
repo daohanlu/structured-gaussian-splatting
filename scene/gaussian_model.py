@@ -93,6 +93,28 @@ class GaussianModel:
         self.denom = denom
         self.optimizer.load_state_dict(opt_dict)
 
+    def restore_parameters(self, model_args, training_args):
+        # Restores parameters but not optimizer states
+        (self.active_sh_degree,
+         _xyz,
+         _features_dc,
+         _features_rest,
+         _scaling,
+         _rotation,
+         _opacity,
+         self.max_radii2D,
+         self.xyz_gradient_accum,
+         self.denom,
+         _,
+         _) = model_args
+        with torch.no_grad():
+            self._xyz.copy_(_xyz)
+            self._features_dc.copy_(_features_dc)
+            self._features_rest.copy_(_features_rest)
+            self._scaling.copy_(_scaling)
+            self._rotation.copy_(_rotation)
+            self._opacity.copy_(_opacity)
+
     @property
     def get_scaling(self):
         return self.scaling_activation(self._scaling)

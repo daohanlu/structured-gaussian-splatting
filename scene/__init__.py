@@ -78,21 +78,22 @@ class Scene:
             print("Loading Test Cameras")
             self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
 
-        if self.loaded_iter:
-            self.gaussians.load_ply(os.path.join(self.model_path,
-                                                           "point_cloud",
-                                                           "iteration_" + str(self.loaded_iter),
-                                                           "point_cloud.ply"))
-        else:
-            if downsample_init != 1.0:
-                num_samples = round((len(scene_info.point_cloud.points) / downsample_init))
-                idx = np.random.choice(len(scene_info.point_cloud.points), num_samples, replace=False)
-                downsampled = BasicPointCloud(points=scene_info.point_cloud.points[idx],
-                                                         colors=scene_info.point_cloud.colors[idx],
-                                                         normals=scene_info.point_cloud.normals[idx])
-                self.gaussians.create_from_pcd(downsampled, self.cameras_extent)
+        if gaussians is not None:
+            if self.loaded_iter:
+                self.gaussians.load_ply(os.path.join(self.model_path,
+                                                               "point_cloud",
+                                                               "iteration_" + str(self.loaded_iter),
+                                                               "point_cloud.ply"))
             else:
-                self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
+                if downsample_init != 1.0:
+                    num_samples = round((len(scene_info.point_cloud.points) / downsample_init))
+                    idx = np.random.choice(len(scene_info.point_cloud.points), num_samples, replace=False)
+                    downsampled = BasicPointCloud(points=scene_info.point_cloud.points[idx],
+                                                             colors=scene_info.point_cloud.colors[idx],
+                                                             normals=scene_info.point_cloud.normals[idx])
+                    self.gaussians.create_from_pcd(downsampled, self.cameras_extent)
+                else:
+                    self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
