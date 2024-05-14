@@ -65,7 +65,7 @@ def get_grad_stats(gaussians: GaussianModel, viewpoint_stack, background, pipe, 
                    accum_steps: int = 1, determininstic_index: int = None,
                    monitor_params: Tuple[str, List[int]] = None) -> Tuple[
     torch.Tensor, Dict[str, np.array], Dict[str, np.array], Dict[str, np.array], Dict[str, np.array]]:
-    assert sampling in ["random", "random_order_whole", "nearby", ""]
+    assert sampling in ["random", "random_wo_replacement", "nearby", ""]
     cam_indices = None
 
     if determininstic_index is not None:
@@ -76,7 +76,7 @@ def get_grad_stats(gaussians: GaussianModel, viewpoint_stack, background, pipe, 
         elif sampling == 'nearby':
             index = randint(0, len(viewpoint_stack) - accum_steps)
             cam_indices = list(range(index, index + accum_steps))
-        elif sampling == "random_order_whole":
+        elif sampling == "random_wo_replacement":
             assert accum_steps == len(viewpoint_stack)
             cam_indices = np.random.permutation(np.arange(len(viewpoint_stack)))
     grad_running_sum = {k: 0 for k in grad_keys}
@@ -104,15 +104,16 @@ def get_grad_stats(gaussians: GaussianModel, viewpoint_stack, background, pipe, 
         else:
             for k in grad_keys:
                 grad_running_sum[k] += getattr(gaussians, k).grad
-                sparsities[k].append(float(get_sparsity(grad_running_sum[k])))
-                variances[k].append(float(get_variance(grad_running_sum[k], mean=0).mean()))
-                cosines[k].append(float(
-                    torch.nn.functional.cosine_similarity(grad_running_sum[k].flatten(), target_grad[k].flatten(),
-                                                          dim=0)))
+
                 signal = target_grad[k].flatten() / len(cam_indices)
                 sample = grad_running_sum[k].flatten() / (i + 1)
                 noise = (sample - signal)
                 SNRs[k].append(float(torch.inner(signal, signal) / torch.inner(noise, noise)))
+                variances[k].append(float(get_variance(sample, mean=0).mean()))  # get the variance of the mean gradient
+                sparsities[k].append(float(get_sparsity(grad_running_sum[k])))
+                cosines[k].append(
+                    float(torch.nn.functional.cosine_similarity(sample, signal, dim=0)))
+
         gaussians.optimizer.zero_grad(set_to_none=True)
     sparsities_np = {k: np.array(v) for k, v in sparsities.items()}
     variances_np = {k: np.array(v) for k, v in variances.items()}
@@ -148,12 +149,14 @@ def fill_subplot(ax, title, xs, ys, xlabel, ylabel, xscale='linear', legend_labe
     else:
         ax.plot(xs, ys, label=legend_labels.replace('_', ''), marker='.')
     ax.set_title(title)
-    ax.set_xlabel(xlabel)
+    if xlabel != '':
+        ax.set_xlabel(xlabel)
     ax.set_xscale(xscale)
     # if xscale == 'log':
     #     ax.set_xticks(xs)
     #     ax.get_xaxis().set_major_formatter(matplotlib.ticker.ScalarFormatter())
-    ax.set_ylabel(ylabel)
+    if ylabel != '':
+        ax.set_ylabel(ylabel)
     if legend_labels != '':
         ax.legend()
 
@@ -189,14 +192,15 @@ def plot_covariance(cov, to_plot: List[int], sqrt=True):
     plt.close()
 
 
-def get_variance_sparsity_cosine_SNR(gaussians, train_cameras, background, pipe, opt, keys, num_trials, accum_steps):
+def get_variance_sparsity_cosine_SNR(gaussians, train_cameras, background, pipe, opt, keys, num_trials, accum_steps,
+                                     sampling='random'):
     sparsities = {k: 0 for k in keys}
     variances = {k: 0 for k in keys}
     cosines = {k: 0 for k in keys}
     SNRs = {k: 0 for k in keys}
-    for trial in range(num_trials):
+    for trial in tqdm(range(num_trials)):
         grads_runing_sum, s, v, c, snrs = get_grad_stats(gaussians, train_cameras, background, pipe, opt, keys,
-                                                         sampling="random_order_whole", accum_steps=accum_steps)
+                                                         sampling=sampling, accum_steps=accum_steps)
         # grads_runing_sum, s, v, c = get_grad_stats(gaussians, train_cameras, background, pipe, opt, keys,
         #                                         sampling="", accum_steps=accum_steps, determininstic_index=0)
         for k in keys:
@@ -208,7 +212,7 @@ def get_variance_sparsity_cosine_SNR(gaussians, train_cameras, background, pipe,
 
 
 def plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe, checkpoint, keys, num_trials=32,
-                                  iters_list=[15000, 30000]):
+                                  iters_list=[15000, 30000], sampling='random'):
     accum_steps = len(train_cameras)
     random.seed()
     variances: List[Dict[str: np.array]] = []
@@ -221,7 +225,7 @@ def plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe,
         (model_params, first_iter) = torch.load(checkpoint.replace("chkpnt" + str(chpt), "chkpnt" + str(iter)))
         gaussians = restored_gaussians(model_params, dataset, opt)
         v, s, c, snrs = get_variance_sparsity_cosine_SNR(gaussians, train_cameras, background, pipe, opt, keys,
-                                                         num_trials, accum_steps)
+                                                         num_trials, accum_steps, sampling=sampling)
         variances.append(v)
         sparsities.append(s)
         cosines.append(c)
@@ -229,17 +233,20 @@ def plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe,
 
     scene_name = os.path.basename(args.source_path)
     for k in keys:
-        fig, ax = plt.subplots(1, 5, figsize=(6 * 5, 6))
+        fig, ax = plt.subplots(1, 5, figsize=(6 * 5, 6), dpi=200)
         for i, iter in enumerate(iters_list):
             fill_subplot(ax[0], 'Batch size vs Grad Sparsity', np.arange(accum_steps),
                          sparsities[i][k],
-                         'Batch size', 'Sparsity', xscale='log', legend_labels='iter ' + str(iter))
+                         'Batch size (log scale)', 'Sparsity', xscale='log', legend_labels='iter ' + str(iter))
             fill_subplot(ax[1], 'Batch size vs Grad Variance', np.arange(accum_steps),
                          variances[i][k],
                          'Batch size', 'Avg Parameter Variance', xscale='linear', legend_labels='iter ' + str(iter))
-            fill_subplot(ax[2], 'Batch size vs Cosine Sim. with Full-Batch Grad', np.arange(accum_steps),
-                         cosines[i][k],
-                         'Batch size', 'Cosine Similarity', xscale='linear', legend_labels='iter ' + str(iter))
+            fill_subplot(ax[2], 'Batch size vs Grad sqrt(Precision)', np.arange(accum_steps),
+                         1/variances[i][k]**0.5,
+                         'Batch size', '1/sqrt(Avg Parameter Variance)', xscale='linear', legend_labels='iter ' + str(iter))
+            # fill_subplot(ax[2], 'Batch size vs Cosine Sim. with Full-Batch Grad', np.arange(accum_steps),
+            #              cosines[i][k],
+            #              'Batch size', 'Cosine Similarity', xscale='linear', legend_labels='iter ' + str(iter))
             # Ignore the last value because full-batch SNR is infinite
             fill_subplot(ax[3], 'Batch size vs grad SNR', np.arange(accum_steps)[:-10],
                          SNRs[i][k][:-10],
@@ -248,11 +255,24 @@ def plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe,
             fill_subplot(ax[4], 'Batch size vs grad NSR', np.arange(accum_steps)[:-10],
                          1 / SNRs[i][k][:-10],
                          'Batch size', 'NSR', xscale='linear', legend_labels='iter ' + str(iter))
-        fig.suptitle(f'Scene: {scene_name}. Param group: {k.replace("_", "")}')
+        for i, iter in enumerate(iters_list):
+            fill_subplot(ax[2], 'Batch size vs Grad sqrt(Precision)', np.arange(accum_steps),
+                         (1 / variances[i][k] ** 0.5) * (np.arange(accum_steps) ** 0.5),
+                         '', '', xscale='linear',
+                         legend_labels='iter ' + str(iter) + '* sqrt(batch size)')
+            fill_subplot(ax[2], 'Batch size vs Grad sqrt(Precision)', np.arange(accum_steps),
+                         (1 / variances[i][k] ** 0.5) * (np.arange(accum_steps) ** 0.667),
+                         '', '', xscale='linear',
+                         legend_labels='iter ' + str(iter) + '* (batch size)**(0.667)')
+            fill_subplot(ax[2], 'Batch size vs Grad sqrt(Precision)', np.arange(accum_steps),
+                         (1 / variances[i][k] ** 0.5) * (np.arange(accum_steps) ** 0.75),
+                         '', '', xscale='linear',
+                         legend_labels='iter ' + str(iter) + '* (batch size)**(0.75))')
+        fig.suptitle(f'Scene: {scene_name}. Sampling: {sampling}. {num_trials} trials. Param group: {k.replace("_", "")}')
         fig.tight_layout()
-        os.makedirs(os.path.join('plots', scene_name), exist_ok=True)
-        fig.savefig(os.path.join('plots', scene_name,
-                                 f'scene_{scene_name}_param_{k.replace("_", "")}_random_order_trials_{num_trials}_snr.png'))
+        os.makedirs(os.path.join('plots_snr', scene_name), exist_ok=True)
+        fig.savefig(os.path.join('plots_snr', scene_name,
+                                 f'scene_{scene_name}_param_{k.replace("_", "")}_sampling_{sampling}_trials_{num_trials}_snr.png'))
         fig.show()
         plt.close(fig)
 
@@ -288,11 +308,14 @@ def run_iterations(gaussians: GaussianModel, train_cameras, opt, camera_ids, bat
 
 
 def clear_adam_state(optimizer, bach_size, rescale_betas=True,
-                     lr_scaling: Literal['constant', 'sqrt', 'linear'] = 'sqrt'):
+                     lr_scaling: str = 'sqrt',
+                     disable_momentum: bool = False):
     for group in optimizer.param_groups:
         # clear ADAM state
         if rescale_betas:
             group['betas'] = (group['betas'][0] ** bach_size, group['betas'][1] ** bach_size)
+            if disable_momentum:
+                group['betas'] = (group['betas'][0] * 0, group['betas'][1])
         for p in group['params']:
             state = optimizer.state[p]
             state['exp_avg'] *= 0
@@ -304,17 +327,27 @@ def clear_adam_state(optimizer, bach_size, rescale_betas=True,
             coeff = float(bach_size) ** 0.5
         elif lr_scaling == 'linear':
             coeff = float(bach_size)
+        elif lr_scaling.startswith('power-'):
+            power = float(lr_scaling.lstrip('power-'))
+            coeff = float(bach_size) ** power
         else:
             raise ValueError(f'Unknown lr_scaling {lr_scaling}')
         group['lr'] *= coeff
 
 
-def plot_batch_size_vs_weights_delta_similarity(dataset, opt, train_cameras, background, pipe, checkpoint_path, keys,
-                                                num_trials=32,
-                                                checkpoints_list=[15000, 30000],
-                                                batch_sizes=[1, 4, 16, 64], warmup_epochs=1, run_epochs=5,
-                                                rescale_betas=True,
-                                                lr_scaling: Literal['constant', 'sqrt', 'linear'] = 'sqrt'):
+def print_learning_rate(optimizer):
+    for group in optimizer.param_groups:
+        print(group['name'], group['lr'])
+
+
+def compute_batch_size_vs_weights_delta(dataset, opt, train_cameras, background, pipe, checkpoint_path, keys,
+                                        num_trials=32,
+                                        checkpoints_list=[15000, 30000],
+                                        batch_sizes=[1, 4, 16, 64], warmup_epochs=1, run_epochs=5,
+                                        rescale_betas=True,
+                                        lr_scaling: str = 'sqrt',
+                                        disable_momentum=False,
+                                        iid_sampling=False):
     random.seed()
     cosines_for_checkpoint = []
     norms_for_checkpoint = []
@@ -330,10 +363,13 @@ def plot_batch_size_vs_weights_delta_similarity(dataset, opt, train_cameras, bac
         print('loading checkpoint ', cur_checkpoint)
         (model_params, first_iter) = torch.load(cur_checkpoint)
 
-        # original_gaussians = restored_gaussians(model_params, opt)
         original_params = {k: model_params[param_index_map[k]] for k in keys}
-        camera_idx = np.concatenate(
-            [np.random.permutation(np.arange(len(train_cameras))) for _ in range(warmup_epochs + run_epochs)])
+        if iid_sampling:
+            camera_idx = np.random.choice(np.arange(len(train_cameras)),
+                                          size=len(train_cameras) * (warmup_epochs + run_epochs), replace=True)
+        else:
+            camera_idx = np.concatenate(
+                [np.random.permutation(np.arange(len(train_cameras))) for _ in range(warmup_epochs + run_epochs)])
 
         for batch_size in batch_sizes:
             if batch_size == 1:
@@ -345,7 +381,7 @@ def plot_batch_size_vs_weights_delta_similarity(dataset, opt, train_cameras, bac
             # Readjust ADAM parameters for batch size > 1
             for i in range(len(temp_batch_sizes)):
                 clear_adam_state(running_gaussians[i].optimizer, temp_batch_sizes[i], rescale_betas=rescale_betas,
-                                 lr_scaling=lr_scaling)
+                                 lr_scaling=lr_scaling, disable_momentum=disable_momentum)
                 # warmup new ADAM state
                 run_iterations(running_gaussians[i], train_cameras, opt,
                                camera_idx[:len(train_cameras) * warmup_epochs], temp_batch_sizes[i], pipe, background,
@@ -361,9 +397,6 @@ def plot_batch_size_vs_weights_delta_similarity(dataset, opt, train_cameras, bac
                     next_accum_step = min(len(camera_idx), (i // temp_batch_size + 1) * temp_batch_size)
                     last_accum_step = (i // temp_batch_size) * temp_batch_size
                     # loss /= min(temp_batch_size, len(train_cameras) - last_accum_step)
-                    # loss /= temp_batch_size
-
-                    # print('batch size ', temp_batch_size, 'next accum step', next_accum_step, 'divider', min(temp_batch_size, len(train_cameras) - last_accum_step))
                     if temp_batch_size == 1:
                         losses[batch_sizes.index(temp_batch_size)][next_accum_step] = float(
                             loss.item()) / temp_batch_size
@@ -389,13 +422,14 @@ def plot_batch_size_vs_weights_delta_similarity(dataset, opt, train_cameras, bac
         losses_for_checkpoint.append(losses)
         norms_for_checkpoint.append(norms)
         del model_params, first_iter, original_params
-    pprint.pp(losses_for_checkpoint)
-    pprint.pp(norms_for_checkpoint)
-    pprint.pp(cosines_for_checkpoint)
+    # pprint.pp(losses_for_checkpoint)
+    # pprint.pp(norms_for_checkpoint)
+    # pprint.pp(cosines_for_checkpoint)
     return cosines_for_checkpoint, losses_for_checkpoint, norms_for_checkpoint
 
 
-def plot(cosines, losses, norms, keys, checkpoint_iter, batch_sizes, rescale_betas: bool, lr_scaling: str, warmup_epochs: int):
+def plot_weight_deltas_cosine_norm_loss(cosines, losses, norms, keys, checkpoint_iter, batch_sizes, rescale_betas: bool, lr_scaling: str,
+                                        warmup_epochs: int, disable_momentum: bool, iid_sampling: bool):
     scene_name = os.path.basename(args.source_path)
     for k in keys:
         fig, ax = plt.subplots(1, 3, figsize=(6 * 3, 6), dpi=200)
@@ -403,7 +437,8 @@ def plot(cosines, losses, norms, keys, checkpoint_iter, batch_sizes, rescale_bet
                      [list(cosines[k][j].keys()) for j in range(len(batch_sizes))],
                      [list(cosines[k][j].values()) for j in range(len(batch_sizes))],
                      'Iterations', 'Cosine Sim', xscale='linear', legend_labels=[f'BS {b}' for b in batch_sizes])
-        fill_subplot(ax[1], 'Batch size vs Loss',
+        ax[0].set_ylim([0.4, 1.0])
+        fill_subplot(ax[1], 'Batch size vs Train Loss',
                      [list(losses[j].keys()) for j in range(len(batch_sizes))],
                      [list(losses[j].values()) for j in range(len(batch_sizes))],
                      'Iterations', 'loss', xscale='linear', legend_labels=[f'BS {b}' for b in batch_sizes])
@@ -412,11 +447,14 @@ def plot(cosines, losses, norms, keys, checkpoint_iter, batch_sizes, rescale_bet
                      [list(norms[k][j].values()) for j in range(len(batch_sizes))],
                      'Iterations', 'norm', xscale='linear', legend_labels=[f'BS {b}' for b in batch_sizes])
 
-        fig.suptitle(f'Scene: {scene_name}. Checkpoint {checkpoint_iter}. Rescale betas: {rescale_betas}. LR scaling: {lr_scaling}. Warmup: {warmup_epochs} epochs. Params: {k}')
+        disable_momentum_str = '_disable momentum' if disable_momentum else ''
+        fig.suptitle(
+            f'Scene: {scene_name}. Checkpoint {checkpoint_iter}. Rescale betas: {rescale_betas}{disable_momentum_str}. LR scaling: {lr_scaling}. Warmup: {warmup_epochs} epochs. IID {iid_sampling}. Params: {k}')
         fig.tight_layout()
-        os.makedirs(os.path.join('plots_grad_delta', scene_name), exist_ok=True)
-        fig.savefig(os.path.join('plots_grad_delta', scene_name,
-                                 f'scene_{scene_name}_checkpoint_{checkpoint_iter}_param_{k.replace("_", "")}_rescale_betas_{rescale_betas}_lr_{lr_scaling}_warmup_{warmup_epochs}.png'))
+        os.makedirs(os.path.join('plots_grad_delta_new', scene_name), exist_ok=True)
+        fig.savefig(os.path.join('plots_grad_delta_new', scene_name,
+                                 f'scene_{scene_name}_checkpoint_{checkpoint_iter}_param_{k.replace("_", "")}'
+                                 f'_rescale_betas_{rescale_betas}{disable_momentum_str.replace(" ", "_")}_lr_{lr_scaling}_warmup_{warmup_epochs}_iid_{iid_sampling}.png'))
         if k == '_xyz':
             fig.show()
         plt.close(fig)
@@ -446,33 +484,93 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     keys = ['_xyz', '_rotation', '_scaling', '_opacity', '_features_dc']
     num_views = len(scene.getTrainCameras())
     train_cameras = scene.getTrainCameras()
-    # plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe, checkpoint, keys, num_trials=4)
     del scene
-    checkpoints_list = [15000, 30000]
-    run_epochs = 4
-    warmup_epochs = 1
-    batch_sizes = [1, 4, 8, 16, 32, 64]
-    # batch_sizes = [1, 4]
-    for lr_scaling in ['sqrt', 'constant', 'linear']:
-        for rescale_betas in [True, False]:
-            cosines_checkpoint, losses_checkpoint, norms_checkpoint = plot_batch_size_vs_weights_delta_similarity(
-                dataset, opt, train_cameras, background, pipe, checkpoint, keys,
-                checkpoints_list=checkpoints_list, batch_sizes=batch_sizes, run_epochs=run_epochs, warmup_epochs=warmup_epochs, rescale_betas=rescale_betas,
-                lr_scaling='sqrt')
-            for i in range(len(checkpoints_list)):
-                plot(cosines_checkpoint[i], losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
-                     batch_sizes, rescale_betas, lr_scaling, warmup_epochs)
-    for warmup_epochs in [0, 1, 2]:
-        lr_scaling = 'sqrt'
+    # plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe, checkpoint, keys, num_trials=4, sampling='random')
+    # quit()
+    # Run all experiments for first checkpoint first, then for second
+    for checkpoints_list in [[7000], [15000]]:
+        batch_sizes = [1, 4, 8, 16, 32, 64]
+        run_epochs = 4
+        # Optimal Defaults
+        iid_sampling = True
+        warmup_epochs = 2
+        disable_momentum = False
         rescale_betas = True
-        cosines_checkpoint, losses_checkpoint, norms_checkpoint = plot_batch_size_vs_weights_delta_similarity(
-            dataset, opt, train_cameras, background, pipe, checkpoint, keys,
-            checkpoints_list=checkpoints_list, batch_sizes=batch_sizes, run_epochs=run_epochs, warmup_epochs=warmup_epochs,
-            rescale_betas=rescale_betas,
-            lr_scaling='sqrt')
-        for i in range(len(checkpoints_list)):
-            plot(cosines_checkpoint[i], losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
-                 batch_sizes, rescale_betas, lr_scaling, warmup_epochs)
+        lr_scaling = 'sqrt'
+
+        # for lr_scaling in ['sqrt', 'constant', 'linear', 'power-0.75']:
+        for lr_scaling in ['power-0.67', 'power-0.75']:
+            cosines_checkpoint, losses_checkpoint, norms_checkpoint = compute_batch_size_vs_weights_delta(
+                dataset, opt, train_cameras, background, pipe, checkpoint, keys,
+                checkpoints_list=checkpoints_list, batch_sizes=batch_sizes,
+                run_epochs=run_epochs, warmup_epochs=warmup_epochs,
+                rescale_betas=rescale_betas,
+                disable_momentum=disable_momentum,
+                lr_scaling=lr_scaling,
+                iid_sampling=iid_sampling)
+            for i in range(len(checkpoints_list)):
+                plot_weight_deltas_cosine_norm_loss(cosines_checkpoint[i], losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
+                                                    batch_sizes, rescale_betas, lr_scaling, warmup_epochs, disable_momentum, iid_sampling)
+        lr_scaling = 'sqrt'
+
+        # for rescale_betas in [False]:
+        #     cosines_checkpoint, losses_checkpoint, norms_checkpoint = compute_batch_size_vs_weights_delta(
+        #         dataset, opt, train_cameras, background, pipe, checkpoint, keys,
+        #         checkpoints_list=checkpoints_list, batch_sizes=batch_sizes,
+        #         run_epochs=run_epochs, warmup_epochs=warmup_epochs,
+        #         rescale_betas=rescale_betas,
+        #         disable_momentum=disable_momentum,
+        #         lr_scaling=lr_scaling,
+        #         iid_sampling=iid_sampling)
+        #     for i in range(len(checkpoints_list)):
+        #         plot_weight_deltas_cosine_norm_loss(cosines_checkpoint[i], losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
+        #                                             batch_sizes, rescale_betas, lr_scaling, warmup_epochs, disable_momentum, iid_sampling)
+        # rescale_betas = True
+        #
+        # for warmup_epochs in [0, 1]:
+        #     cosines_checkpoint, losses_checkpoint, norms_checkpoint = compute_batch_size_vs_weights_delta(
+        #         dataset, opt, train_cameras, background, pipe, checkpoint, keys,
+        #         checkpoints_list=checkpoints_list, batch_sizes=batch_sizes,
+        #         run_epochs=run_epochs, warmup_epochs=warmup_epochs,
+        #         rescale_betas=rescale_betas,
+        #         disable_momentum=disable_momentum,
+        #         lr_scaling=lr_scaling,
+        #         iid_sampling=iid_sampling)
+        #     for i in range(len(checkpoints_list)):
+        #         plot_weight_deltas_cosine_norm_loss(cosines_checkpoint[i], losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
+        #                                             batch_sizes, rescale_betas, lr_scaling, warmup_epochs, disable_momentum, iid_sampling)
+        # warmup_epochs = 2
+        #
+        # for iid_sampling in [False]:
+        #     cosines_checkpoint, losses_checkpoint, norms_checkpoint = compute_batch_size_vs_weights_delta(
+        #         dataset, opt, train_cameras, background, pipe, checkpoint, keys,
+        #         checkpoints_list=checkpoints_list, batch_sizes=batch_sizes,
+        #         run_epochs=run_epochs, warmup_epochs=warmup_epochs,
+        #         rescale_betas=rescale_betas,
+        #         disable_momentum=disable_momentum,
+        #         lr_scaling=lr_scaling,
+        #         iid_sampling=iid_sampling)
+        #     for i in range(len(checkpoints_list)):
+        #         plot_weight_deltas_cosine_norm_loss(cosines_checkpoint[i], losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
+        #                                             batch_sizes, rescale_betas, lr_scaling, warmup_epochs, disable_momentum, iid_sampling)
+        # iid_sampling = True
+
+        # for warmup_epochs in [0, 1, 2]:
+        #     for lr_scaling in ['sqrt', 'constant', 'linear']:
+        #         disable_momentums = [False, True] if warmup_epochs == 2 else [False]
+        #         for disable_momentum in disable_momentums:
+        #             rescale_betas = True
+        #             cosines_checkpoint, losses_checkpoint, norms_checkpoint = plot_batch_size_vs_weights_delta_similarity(
+        #                 dataset, opt, train_cameras, background, pipe, checkpoint, keys,
+        #                 checkpoints_list=checkpoints_list, batch_sizes=batch_sizes,
+        #                 run_epochs=run_epochs, warmup_epochs=warmup_epochs,
+        #                 rescale_betas=rescale_betas,
+        #                 disable_momentum=disable_momentum,
+        #                 lr_scaling=lr_scaling,
+        #                 iid_sampling=iid_sampling)
+        #             for i in range(len(checkpoints_list)):
+        #                 plot(cosines_checkpoint[i], losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
+        #                      batch_sizes, rescale_betas, lr_scaling, warmup_epochs, disable_momentum, iid_sampling)
     quit()
 
     for iteration in range(first_iter, opt.iterations + 1):
