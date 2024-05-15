@@ -88,16 +88,7 @@ def get_grad_stats(gaussians: GaussianModel, viewpoint_stack, background, pipe, 
 
     gaussians.optimizer.zero_grad(set_to_none=True)
     for i, cam_idx in enumerate(cam_indices):
-        viewpoint_cam = viewpoint_stack[cam_idx]
-        bg = background
-        render_pkg = render(viewpoint_cam, gaussians, pipe, bg)
-        image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], \
-            render_pkg["visibility_filter"], render_pkg["radii"]
-        # Loss
-        gt_image = viewpoint_cam.original_image.cuda()
-        Ll1 = l1_loss(image, gt_image)
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
-        loss.backward()
+        loss = backward_once(gaussians, viewpoint_stack[cam_idx], opt, pipe, background)
 
         if monitor_params is not None:
             raise NotImplementedError()
@@ -170,24 +161,26 @@ def plot_histogram(grads, num_bins=1000):
     plt.close()
 
 
-def plot_covariance(cov, to_plot: List[int], sqrt=True):
-    if len(to_plot) >= 4:
-        nrows, ncols = 2, math.ceil(len(to_plot) / 2)
+def plot_similarity_matrix(similarity_mats: List[torch.Tensor], param_groups: List[str], iteration_number: int, abs=True):
+    assert len(similarity_mats) == len(param_groups)
+    if len(param_groups) >= 4:
+        nrows, ncols = 2, math.ceil(len(param_groups) / 2)
     else:
-        nrows, ncols = 1, len(to_plot)
+        nrows, ncols = 1, len(param_groups)
     fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 6 * nrows + 2), dpi=200)
     for i, ax in enumerate(fig.axes):
-        if i > len(to_plot):
-            break
-        if sqrt:
-            ax.imshow(torch.sqrt(torch.abs(cov[to_plot[i]])), cmap='gray')
-            ax.set_title(f'sqrt(covariance) for parameter {to_plot[i]}')
+        if i >= len(param_groups):
+            ax.axis('off')
+            continue
+        if abs:
+            ax.imshow(torch.abs(similarity_mats[i]), cmap='gray')
         else:
-            ax.imshow(torch.abs(cov[to_plot[i]]), cmap='gray')
-            ax.set_title(f'covariance for parameter {to_plot[i]}')
+            ax.imshow(similarity_mats[i], cmap='gray', vmin=0, vmax=1)
+        ax.set_title(f'Param group {param_groups[i]}')
         ax.set_xlabel('view #')
         ax.set_ylabel('view #')
-    plt.suptitle('Grad covariance by view')
+    plt.suptitle(f'Absolute cosine similarity of gradients from different views: Iteration{iteration_number}\n')
+    plt.tight_layout()
     plt.show()
     plt.close()
 
@@ -340,7 +333,21 @@ def print_learning_rate(optimizer):
         print(group['name'], group['lr'])
 
 
-def compute_batch_size_vs_weights_delta(dataset, opt, train_cameras, background, pipe, checkpoint_path, keys,
+def get_test_errors(gaussians: GaussianModel, test_cameras, pipe, background):
+    with torch.no_grad():
+        l1_test = 0.0
+        # psnr_test = 0.0
+        for idx, viewpoint in enumerate(test_cameras):
+            image = torch.clamp(render(viewpoint, gaussians, pipe, background)["render"], 0.0, 1.0)
+            gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+            l1_test += l1_loss(image, gt_image).mean().double()
+            # psnr_test += psnr(image, gt_image).mean().double()
+        l1_test /= len(test_cameras)
+        # psnr_test /= len(test_cameras)
+    return l1_test
+
+
+def compute_batch_size_vs_weights_delta(dataset, opt, train_cameras, test_cameras, background, pipe, checkpoint_path, keys,
                                         num_trials=32,
                                         checkpoints_list=[15000, 30000],
                                         batch_sizes=[1, 4, 16, 64], warmup_epochs=1, run_epochs=5,
@@ -352,12 +359,14 @@ def compute_batch_size_vs_weights_delta(dataset, opt, train_cameras, background,
     cosines_for_checkpoint = []
     norms_for_checkpoint = []
     losses_for_checkpoint = []
+    test_losses_for_checkpoint = []
     param_index_map = {'_xyz': 1, '_features_dc': 2, '_features_rest': 3, '_scaling': 4, '_rotation': 5, '_opacity': 6}
 
     for checkpoint_itr in checkpoints_list:
         cosines: Dict[str, List[Dict[int, float]]] = {k: [{} for _ in range(len(batch_sizes))] for k in keys}
         norms: Dict[str, List[Dict[int, float]]] = {k: [{} for _ in range(len(batch_sizes))] for k in keys}
         losses: List[Dict[int, float]] = [defaultdict(float) for _ in range(len(batch_sizes))]
+        test_losses: List[Dict[int, float]] = [defaultdict(float) for _ in range(len(batch_sizes))]
         chpt = checkpoint_path.rstrip(".pth").split("chkpnt")[1]
         cur_checkpoint = checkpoint_path.replace("chkpnt" + str(chpt), "chkpnt" + str(checkpoint_itr))
         print('loading checkpoint ', cur_checkpoint)
@@ -412,6 +421,8 @@ def compute_batch_size_vs_weights_delta(dataset, opt, train_cameras, background,
                             # compare weight delta from batch-size 1 and that from the current batch-size
                             weight_delta = getattr(running_gaussian, k).detach() - original_params[k]
                             norms[k][batch_sizes.index(temp_batch_size)][i + 1] = float(torch.linalg.norm(weight_delta))
+                            if len(test_cameras) > 0:
+                                test_losses[batch_sizes.index(temp_batch_size)][i + 1] += float(get_test_errors(running_gaussian, test_cameras, pipe, background))
                             if temp_batch_size != 1:
                                 reference_weight_delta = getattr(running_gaussians[0], k).detach() - original_params[k]
                                 cosines[k][batch_sizes.index(temp_batch_size)][i + 1] = float(
@@ -420,12 +431,13 @@ def compute_batch_size_vs_weights_delta(dataset, opt, train_cameras, background,
             del running_gaussians, running_gaussian, weight_delta, reference_weight_delta, loss
         cosines_for_checkpoint.append(cosines)
         losses_for_checkpoint.append(losses)
+        test_losses_for_checkpoint.append(test_losses)
         norms_for_checkpoint.append(norms)
         del model_params, first_iter, original_params
     # pprint.pp(losses_for_checkpoint)
     # pprint.pp(norms_for_checkpoint)
     # pprint.pp(cosines_for_checkpoint)
-    return cosines_for_checkpoint, losses_for_checkpoint, norms_for_checkpoint
+    return cosines_for_checkpoint, losses_for_checkpoint, test_losses_for_checkpoint, norms_for_checkpoint
 
 
 def plot_weight_deltas_cosine_norm_loss(cosines, losses, norms, keys, checkpoint_iter, batch_sizes, rescale_betas: bool, lr_scaling: str,
@@ -454,10 +466,42 @@ def plot_weight_deltas_cosine_norm_loss(cosines, losses, norms, keys, checkpoint
         os.makedirs(os.path.join('plots_grad_delta_new', scene_name), exist_ok=True)
         fig.savefig(os.path.join('plots_grad_delta_new', scene_name,
                                  f'scene_{scene_name}_checkpoint_{checkpoint_iter}_param_{k.replace("_", "")}'
-                                 f'_rescale_betas_{rescale_betas}{disable_momentum_str.replace(" ", "_")}_lr_{lr_scaling}_warmup_{warmup_epochs}_iid_{iid_sampling}.png'))
+                                 f'_rescale_betas_{rescale_betas}{disable_momentum_str.replace(" ", "_")}_lr_{lr_scaling}_warmup_{warmup_epochs}_iid_{iid_sampling}_test_losses.png'))
         if k == '_xyz':
             fig.show()
         plt.close(fig)
+
+
+def plot_grad_similarity_between_views(dataset, opt, train_cameras, background, pipe, checkpoint_path, keys,
+                                       checkpoints_list: List[int]):
+
+    for checkpoint_itr in checkpoints_list:
+        grads: Dict[str, List[torch.Tensor]] = {k: [] for k in keys}
+        similarity_matrix: Dict[str, torch.Tensor] = {k: torch.eye(len(train_cameras)) for k in keys}
+        chpt = checkpoint_path.rstrip(".pth").split("chkpnt")[1]
+        cur_checkpoint = checkpoint_path.replace("chkpnt" + str(chpt), "chkpnt" + str(checkpoint_itr))
+        print('loading checkpoint ', cur_checkpoint)
+        (model_params, first_iter) = torch.load(cur_checkpoint)
+        gaussians = restored_gaussians(model_params, dataset, opt)
+        print('Getting gradients ', cur_checkpoint)
+        for i in tqdm(range(len(train_cameras))):
+            gaussians.optimizer.zero_grad(set_to_none=True)
+            loss = backward_once(gaussians, train_cameras[i], opt, pipe, background)
+            for k in keys:
+                grads[k].append(getattr(gaussians, k).grad.clone().cpu())
+        del gaussians
+        print('Computing cosines ', cur_checkpoint)
+        for k in keys:
+            for i in tqdm(range(len(train_cameras))):
+                grads_i = grads[k][i].flatten().cuda()
+                for j in range(i + 1, len(train_cameras)):
+                    grads_j = grads[k][j].flatten().cuda()
+                    sim = torch.cosine_similarity(grads_i, grads_j, dim=0).cpu()
+                    similarity_matrix[k][i][j] = sim
+                    similarity_matrix[k][j][i] = sim
+        plot_similarity_matrix(list(similarity_matrix.values()), list(similarity_matrix.keys()), checkpoint_itr)
+
+
 
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
@@ -484,7 +528,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     keys = ['_xyz', '_rotation', '_scaling', '_opacity', '_features_dc']
     num_views = len(scene.getTrainCameras())
     train_cameras = scene.getTrainCameras()
+    test_cameras = scene.getTrainCameras()[:5]
     del scene
+
+    # plot_grad_similarity_between_views(dataset, opt, train_cameras, background, pipe, checkpoint, keys,
+    #                                    [7000, 15000, 30000])
+    # quit()
+
     # plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe, checkpoint, keys, num_trials=4, sampling='random')
     # quit()
     # Run all experiments for first checkpoint first, then for second
@@ -498,10 +548,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         rescale_betas = True
         lr_scaling = 'sqrt'
 
-        # for lr_scaling in ['sqrt', 'constant', 'linear', 'power-0.75']:
-        for lr_scaling in ['power-0.67', 'power-0.75']:
-            cosines_checkpoint, losses_checkpoint, norms_checkpoint = compute_batch_size_vs_weights_delta(
-                dataset, opt, train_cameras, background, pipe, checkpoint, keys,
+        for lr_scaling in ['sqrt', 'constant', 'linear']:
+        # for lr_scaling in ['power-0.67', 'power-0.75']:
+            cosines_checkpoint, losses_checkpoint, test_losses_checkpoint, norms_checkpoint = compute_batch_size_vs_weights_delta(
+                dataset, opt, train_cameras, test_cameras, background, pipe, checkpoint, keys,
                 checkpoints_list=checkpoints_list, batch_sizes=batch_sizes,
                 run_epochs=run_epochs, warmup_epochs=warmup_epochs,
                 rescale_betas=rescale_betas,
@@ -509,13 +559,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 lr_scaling=lr_scaling,
                 iid_sampling=iid_sampling)
             for i in range(len(checkpoints_list)):
-                plot_weight_deltas_cosine_norm_loss(cosines_checkpoint[i], losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
+                # plot_weight_deltas_cosine_norm_loss(cosines_checkpoint[i], losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
+                #                                     batch_sizes, rescale_betas, lr_scaling, warmup_epochs, disable_momentum, iid_sampling)
+                plot_weight_deltas_cosine_norm_loss(cosines_checkpoint[i], test_losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
                                                     batch_sizes, rescale_betas, lr_scaling, warmup_epochs, disable_momentum, iid_sampling)
         lr_scaling = 'sqrt'
 
         # for rescale_betas in [False]:
-        #     cosines_checkpoint, losses_checkpoint, norms_checkpoint = compute_batch_size_vs_weights_delta(
-        #         dataset, opt, train_cameras, background, pipe, checkpoint, keys,
+        #     cosines_checkpoint, losses_checkpoint, test_losses_checkpoint, norms_checkpoint = compute_batch_size_vs_weights_delta(
+        #         dataset, opt, train_cameras, test_cameras, background, pipe, checkpoint, keys,
         #         checkpoints_list=checkpoints_list, batch_sizes=batch_sizes,
         #         run_epochs=run_epochs, warmup_epochs=warmup_epochs,
         #         rescale_betas=rescale_betas,
@@ -528,8 +580,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # rescale_betas = True
         #
         # for warmup_epochs in [0, 1]:
-        #     cosines_checkpoint, losses_checkpoint, norms_checkpoint = compute_batch_size_vs_weights_delta(
-        #         dataset, opt, train_cameras, background, pipe, checkpoint, keys,
+        #     cosines_checkpoint, losses_checkpoint, test_losses_checkpoint, norms_checkpoint = compute_batch_size_vs_weights_delta(
+        #         dataset, opt, train_cameras, test_cameras, background, pipe, checkpoint, keys,
         #         checkpoints_list=checkpoints_list, batch_sizes=batch_sizes,
         #         run_epochs=run_epochs, warmup_epochs=warmup_epochs,
         #         rescale_betas=rescale_betas,
@@ -542,8 +594,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # warmup_epochs = 2
         #
         # for iid_sampling in [False]:
-        #     cosines_checkpoint, losses_checkpoint, norms_checkpoint = compute_batch_size_vs_weights_delta(
-        #         dataset, opt, train_cameras, background, pipe, checkpoint, keys,
+        #     cosines_checkpoint, losses_checkpoint, test_losses_checkpoint, norms_checkpoint = compute_batch_size_vs_weights_delta(
+        #         dataset, opt, train_cameras, test_cameras, background, pipe, checkpoint, keys,
         #         checkpoints_list=checkpoints_list, batch_sizes=batch_sizes,
         #         run_epochs=run_epochs, warmup_epochs=warmup_epochs,
         #         rescale_betas=rescale_betas,
@@ -554,14 +606,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         #         plot_weight_deltas_cosine_norm_loss(cosines_checkpoint[i], losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
         #                                             batch_sizes, rescale_betas, lr_scaling, warmup_epochs, disable_momentum, iid_sampling)
         # iid_sampling = True
-
+        #
         # for warmup_epochs in [0, 1, 2]:
         #     for lr_scaling in ['sqrt', 'constant', 'linear']:
         #         disable_momentums = [False, True] if warmup_epochs == 2 else [False]
         #         for disable_momentum in disable_momentums:
         #             rescale_betas = True
-        #             cosines_checkpoint, losses_checkpoint, norms_checkpoint = plot_batch_size_vs_weights_delta_similarity(
-        #                 dataset, opt, train_cameras, background, pipe, checkpoint, keys,
+        #             cosines_checkpoint, losses_checkpoint, test_losses_checkpoint, norms_checkpoint = compute_batch_size_vs_weights_delta(
+        #                 dataset, opt, train_cameras, test_cameras, background, pipe, checkpoint, keys,
         #                 checkpoints_list=checkpoints_list, batch_sizes=batch_sizes,
         #                 run_epochs=run_epochs, warmup_epochs=warmup_epochs,
         #                 rescale_betas=rescale_betas,
