@@ -87,6 +87,16 @@ def get_grad_stats(gaussians: GaussianModel, viewpoint_stack, background, pipe, 
     target_grad = get_full_batch_gradients(gaussians, viewpoint_stack, background, pipe, opt, grad_keys)
 
     gaussians.optimizer.zero_grad(set_to_none=True)
+    exp_avg: Dict[str, torch.Tensor] = {}
+    for group in gaussians.optimizer.param_groups:
+        group_name = '_' + group['name']
+        group_name = group_name.replace('_f_dc', '_features_dc')
+        group_name = group_name.replace('_f_rest', '_features_rest')
+        assert len(group['params']) == 1
+        state = gaussians.optimizer.state[group['params'][0]]
+        exp_avg[group_name] = state['exp_avg']
+        assert torch.count_nonzero(exp_avg[group_name]) > 0, f'ADAM exp avg for {group_name} is all 0! Did you reset ADAM states?'
+
     for i, cam_idx in enumerate(cam_indices):
         loss = backward_once(gaussians, viewpoint_stack[cam_idx], opt, pipe, background)
 
@@ -100,7 +110,7 @@ def get_grad_stats(gaussians: GaussianModel, viewpoint_stack, background, pipe, 
                 sample = grad_running_sum[k].flatten() / (i + 1)
                 noise = (sample - signal)
                 SNRs[k].append(float(torch.inner(signal, signal) / torch.inner(noise, noise)))
-                variances[k].append(float(get_variance(sample, mean=0).mean()))  # get the variance of the mean gradient
+                variances[k].append(float(get_variance(sample, mean=exp_avg[k].flatten()).mean()))  # get the variance of the mean gradient
                 sparsities[k].append(float(get_sparsity(grad_running_sum[k])))
                 cosines[k].append(
                     float(torch.nn.functional.cosine_similarity(sample, signal, dim=0)))
@@ -130,15 +140,15 @@ def restored_gaussians(model_params, dataset, opt, deepcopy=False) -> GaussianMo
     return gaussians
 
 
-def fill_subplot(ax, title, xs, ys, xlabel, ylabel, xscale='linear', legend_labels: Union[str, List[str]] = ""):
+def fill_subplot(ax, title, xs, ys, xlabel, ylabel, xscale='linear', legend_labels: Union[str, List[str]] = "", markersize=4):
     if isinstance(ys[0], list):
         for i in range(len(ys)):
             if isinstance(xs[0], list):
-                ax.plot(xs[i], ys[i], label=legend_labels[i].replace('_', ''), marker='.')
+                ax.plot(xs[i], ys[i], label=legend_labels[i].replace('_', ''), marker='.', markersize=markersize)
             else:
-                ax.plot(xs, ys[i], label=legend_labels[i].replace('_', ''), marker='.')
+                ax.plot(xs, ys[i], label=legend_labels[i].replace('_', ''), marker='.', markersize=markersize)
     else:
-        ax.plot(xs, ys, label=legend_labels.replace('_', ''), marker='.')
+        ax.plot(xs, ys, label=legend_labels.replace('_', ''), marker='.', markersize=markersize)
     ax.set_title(title)
     if xlabel != '':
         ax.set_xlabel(xlabel)
@@ -205,7 +215,7 @@ def get_variance_sparsity_cosine_SNR(gaussians, train_cameras, background, pipe,
 
 
 def plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe, checkpoint, keys, num_trials=32,
-                                  iters_list=[15000, 30000], sampling='random'):
+                                  iters_list=[7000, 15000, 30000], sampling='random'):
     accum_steps = len(train_cameras)
     random.seed()
     variances: List[Dict[str: np.array]] = []
@@ -226,46 +236,48 @@ def plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe,
 
     scene_name = os.path.basename(args.source_path)
     for k in keys:
-        fig, ax = plt.subplots(1, 5, figsize=(6 * 5, 6), dpi=200)
+        ncols = 3
+        fig, ax = plt.subplots(1, ncols, figsize=(4.5 * ncols, 4.5), dpi=300)
+        xs = np.arange(1, accum_steps + 1)
         for i, iter in enumerate(iters_list):
-            fill_subplot(ax[0], 'Batch size vs Grad Sparsity', np.arange(accum_steps),
+            fill_subplot(ax[0], 'Batch size vs Grad Sparsity', xs,
                          sparsities[i][k],
                          'Batch size (log scale)', 'Sparsity', xscale='log', legend_labels='iter ' + str(iter))
-            fill_subplot(ax[1], 'Batch size vs Grad Variance', np.arange(accum_steps),
+            fill_subplot(ax[1], 'Batch size vs Grad Variance', xs,
                          variances[i][k],
                          'Batch size', 'Avg Parameter Variance', xscale='linear', legend_labels='iter ' + str(iter))
-            fill_subplot(ax[2], 'Batch size vs Grad sqrt(Precision)', np.arange(accum_steps),
-                         1/variances[i][k]**0.5,
-                         'Batch size', '1/sqrt(Avg Parameter Variance)', xscale='linear', legend_labels='iter ' + str(iter))
-            # fill_subplot(ax[2], 'Batch size vs Cosine Sim. with Full-Batch Grad', np.arange(accum_steps),
+            fill_subplot(ax[2], 'Batch size vs Grad Precision', xs,
+                         1/variances[i][k],
+                         'Batch size', '1/(Avg Parameter Variance)', xscale='linear', legend_labels='iter ' + str(iter))
+            # fill_subplot(ax[2], 'Batch size vs Cosine Sim. with Full-Batch Grad', xs,
             #              cosines[i][k],
             #              'Batch size', 'Cosine Similarity', xscale='linear', legend_labels='iter ' + str(iter))
             # Ignore the last value because full-batch SNR is infinite
-            fill_subplot(ax[3], 'Batch size vs grad SNR', np.arange(accum_steps)[:-10],
-                         SNRs[i][k][:-10],
-                         'Batch size', 'SNR', xscale='linear', legend_labels='iter ' + str(iter))
-            # Ignore the last value because full-batch SNR is infinite
-            fill_subplot(ax[4], 'Batch size vs grad NSR', np.arange(accum_steps)[:-10],
-                         1 / SNRs[i][k][:-10],
-                         'Batch size', 'NSR', xscale='linear', legend_labels='iter ' + str(iter))
-        for i, iter in enumerate(iters_list):
-            fill_subplot(ax[2], 'Batch size vs Grad sqrt(Precision)', np.arange(accum_steps),
-                         (1 / variances[i][k] ** 0.5) * (np.arange(accum_steps) ** 0.5),
-                         '', '', xscale='linear',
-                         legend_labels='iter ' + str(iter) + '* sqrt(batch size)')
-            fill_subplot(ax[2], 'Batch size vs Grad sqrt(Precision)', np.arange(accum_steps),
-                         (1 / variances[i][k] ** 0.5) * (np.arange(accum_steps) ** 0.667),
-                         '', '', xscale='linear',
-                         legend_labels='iter ' + str(iter) + '* (batch size)**(0.667)')
-            fill_subplot(ax[2], 'Batch size vs Grad sqrt(Precision)', np.arange(accum_steps),
-                         (1 / variances[i][k] ** 0.5) * (np.arange(accum_steps) ** 0.75),
-                         '', '', xscale='linear',
-                         legend_labels='iter ' + str(iter) + '* (batch size)**(0.75))')
-        fig.suptitle(f'Scene: {scene_name}. Sampling: {sampling}. {num_trials} trials. Param group: {k.replace("_", "")}')
+            # fill_subplot(ax[3], 'Batch size vs grad SNR', xs[:-10],
+            #              SNRs[i][k][:-10],
+            #              'Batch size', 'SNR', xscale='linear', legend_labels='iter ' + str(iter))
+            # # Ignore the last value because full-batch SNR is infinite
+            # fill_subplot(ax[4], 'Batch size vs grad NSR', xs[:-10],
+            #              1 / SNRs[i][k][:-10],
+            #              'Batch size', 'NSR', xscale='linear', legend_labels='iter ' + str(iter))
+        # for i, iter in enumerate(iters_list):
+        #     fill_subplot(ax[2], 'Batch size vs Grad sqrt(Precision)', xs,
+        #                  (1 / variances[i][k] ** 0.5) * (np.arange(accum_steps) ** 0.5),
+        #                  '', '', xscale='linear',
+        #                  legend_labels='iter ' + str(iter) + '* sqrt(batch size)')
+        #     fill_subplot(ax[2], 'Batch size vs Grad sqrt(Precision)', xs,
+        #                  (1 / variances[i][k] ** 0.5) * (np.arange(accum_steps) ** 0.667),
+        #                  '', '', xscale='linear',
+        #                  legend_labels='iter ' + str(iter) + '* (batch size)**(0.667)')
+        #     fill_subplot(ax[2], 'Batch size vs Grad sqrt(Precision)', xs,
+        #                  (1 / variances[i][k] ** 0.5) * (np.arange(accum_steps) ** 0.75),
+        #                  '', '', xscale='linear',
+        #                  legend_labels='iter ' + str(iter) + '* (batch size)**(0.75))')
+        fig.suptitle(f'Scene: {scene_name}. Param group: {k.replace("_", "")}.')
         fig.tight_layout()
         os.makedirs(os.path.join('plots_snr', scene_name), exist_ok=True)
         fig.savefig(os.path.join('plots_snr', scene_name,
-                                 f'scene_{scene_name}_param_{k.replace("_", "")}_sampling_{sampling}_trials_{num_trials}_snr.png'))
+                                 f'scene_{scene_name}_param_{k.replace("_", "")}_sampling_{sampling}_trials_{num_trials}.pdf'))
         fig.show()
         plt.close(fig)
 
@@ -300,13 +312,15 @@ def run_iterations(gaussians: GaussianModel, train_cameras, opt, camera_ids, bat
     return gaussians
 
 
-def clear_adam_state(optimizer, bach_size, rescale_betas=True,
+def clear_adam_state(optimizer, batch_size, rescale_betas=True,
                      lr_scaling: str = 'sqrt',
                      disable_momentum: bool = False):
     for group in optimizer.param_groups:
         # clear ADAM state
+        # effective_bses = [1.0, 1.5049873111431473, 2.7032357769224435, 4.359507132813812, 4.9381875790105365, 5.37417372027395, 6.163066933794536, 6.572855687883565, 7.578009795823763, 8.639301783737858, 9.142897465170346, 10.531347945681924, 11.451054537769194, 11.850305762724846, 11.31590084660537, 11.02668728849445, 11.572372261790177, 11.329266139074573, 11.46019140106616, 12.001660258735463, 12.728031443382296, 13.272023941036055, 12.977059320122164, 13.13261867972596, 13.641024817672943, 13.863450764797912, 14.112725337059102, 14.897364432803249, 15.038098707851267, 15.291073712932263, 15.594879672043568, 15.73044990073995, 15.769253705047083, 15.994006063120962, 16.265393216035044, 16.336609245161462, 16.567914108028834, 16.762598910248542, 16.751942597858555, 17.135993175111082, 17.34633401392654, 17.36684923046376, 17.578179823599697, 17.629964652825613, 17.80358989486209, 17.880135141696073, 17.893365409766343, 17.935315961936652, 17.780071022356157, 17.981475199145397, 17.879820084765228, 18.00647721701445, 18.007065294978354, 17.88691523478462, 17.820218701577197, 17.933964444132243, 18.26070565613837, 18.321030566294265, 18.593946721914502, 18.805305763587324, 18.848135248165782, 19.160055197061382, 19.225264338855407, 19.421792351502056, 19.344990643231107, 19.432703002303867, 19.567476459665038, 19.62953673057074, 19.7831592543389, 20.152570299432924, 20.3866609958896, 20.380649013296864, 20.550959363879038, 20.67827675694694, 20.71336314423314, 20.72956904434027, 20.693768471396822, 20.567774996806506, 20.657902509279047, 20.692330334166677, 20.768576234455857, 20.85520118005168, 20.909910264106053, 21.014815305371226, 21.07972637443553, 21.28139040950196, 21.22919965786919, 21.330730787581157, 21.520202713870997, 21.547064501763085, 21.639366841189506, 21.712038416352218, 21.718866065203915, 21.84990214910783, 21.849152721233253, 21.856460598371715, 22.003717443558745, 22.0886741159992, 22.076349955058873, 22.15019089246895, 22.117001640448258, 22.13917961027548, 22.146765179102314, 22.20826030071563, 22.323677713266267, 22.32421314020669, 22.485194918321717, 22.570085352377788, 22.526872874063994, 22.521910090495673, 22.538584329948783, 22.58696467605947, 22.60043272294547, 22.622832336597355, 22.635177727789088, 22.730132574825987, 22.811644851278572, 22.852522851147928, 22.90067688277864, 22.970394480760927, 22.94129375055572, 23.003269100455803, 23.049292888660588, 23.046074382547662, 23.175441768691183, 23.171503557055644, 23.289909339793983, 23.319119618096437, 23.340102749374612, 23.331992368733058, 23.339944371699136, 23.348534556022432, 23.361932118473774, 23.405903790577796, 23.50292094423613, 23.534112854204686, 23.57479723418123, 23.57624471272199, 23.62499149297192, 23.69120992091771, 23.776791611959517, 23.767258804473855, 23.82374188833559, 23.884781408753767, 23.873846130860326, 23.88346895461194, 23.912116631252175, 23.95605433495395, 23.912260996961724, 23.965874175438596, 23.971844546738577, 23.978796604863504, 23.9806648669871, 24.08468842821396, 24.12982988717037, 24.18392414314407, 24.179952812316337, 24.122455347042493, 24.164281914544603, 24.16658624603205, 24.2095758067061, 24.181303056305666, 24.219533219219848, 24.28376576944926, 24.28959050122461, 24.358193935613187, 24.367555627272523, 24.349283599098708, 24.393242108446856, 24.39535239543647, 24.470697708461067, 24.466522142614824, 24.40268744729673, 24.43494808812099, 24.447839521378842, 24.462202211059033, 24.55593462022006, 24.578429345398238, 24.565906469304764, 24.576965307261382, 24.599242634665178, 24.6904702987655, 24.690620608945444, 24.691845594451486, 24.692939801608873, 24.736526356952417, 24.7990201495918, 24.82763131019962, 24.829790426767463, 24.836258859765394, 24.855294327779717, 24.89008221773117, 24.90383092854074, 24.91560480136466]
+        # effective_bs = effective_bses[batch_size - 1]
         if rescale_betas:
-            group['betas'] = (group['betas'][0] ** bach_size, group['betas'][1] ** bach_size)
+            group['betas'] = (group['betas'][0] ** batch_size, group['betas'][1] ** batch_size)
             if disable_momentum:
                 group['betas'] = (group['betas'][0] * 0, group['betas'][1])
         for p in group['params']:
@@ -317,12 +331,12 @@ def clear_adam_state(optimizer, bach_size, rescale_betas=True,
         if lr_scaling == 'constant':
             coeff = 1
         elif lr_scaling == 'sqrt':
-            coeff = float(bach_size) ** 0.5
+            coeff = float(batch_size) ** 0.5
         elif lr_scaling == 'linear':
-            coeff = float(bach_size)
+            coeff = float(batch_size)
         elif lr_scaling.startswith('power-'):
             power = float(lr_scaling.lstrip('power-'))
-            coeff = float(bach_size) ** power
+            coeff = float(batch_size) ** power
         else:
             raise ValueError(f'Unknown lr_scaling {lr_scaling}')
         group['lr'] *= coeff
@@ -422,7 +436,7 @@ def compute_batch_size_vs_weights_delta(dataset, opt, train_cameras, test_camera
                             weight_delta = getattr(running_gaussian, k).detach() - original_params[k]
                             norms[k][batch_sizes.index(temp_batch_size)][i + 1] = float(torch.linalg.norm(weight_delta))
                             if len(test_cameras) > 0:
-                                test_losses[batch_sizes.index(temp_batch_size)][i + 1] += float(get_test_errors(running_gaussian, test_cameras, pipe, background))
+                                test_losses[batch_sizes.index(temp_batch_size)][i + 1] = float(get_test_errors(running_gaussian, test_cameras, pipe, background))
                             if temp_batch_size != 1:
                                 reference_weight_delta = getattr(running_gaussians[0], k).detach() - original_params[k]
                                 cosines[k][batch_sizes.index(temp_batch_size)][i + 1] = float(
@@ -443,6 +457,18 @@ def compute_batch_size_vs_weights_delta(dataset, opt, train_cameras, test_camera
 def plot_weight_deltas_cosine_norm_loss(cosines, losses, norms, keys, checkpoint_iter, batch_sizes, rescale_betas: bool, lr_scaling: str,
                                         warmup_epochs: int, disable_momentum: bool, iid_sampling: bool):
     scene_name = os.path.basename(args.source_path)
+    save_dict = {'cosines_checkpoint': cosines,
+                 'test_losses_checkpoint': losses,
+                 'norms_checkpoint': norms,
+                 'keys': keys,
+                 'checkpoint_iter': checkpoint_iter,
+                 'batch_sizes': batch_sizes,
+                 'rescale_betas': rescale_betas,
+                 'lr_scaling': lr_scaling,
+                 'warmup_epochs': warmup_epochs,
+                 'disable_momentum': disable_momentum,
+                 'iid_sampling': iid_sampling}
+
     for k in keys:
         fig, ax = plt.subplots(1, 3, figsize=(6 * 3, 6), dpi=200)
         fill_subplot(ax[0], 'Batch size vs cosine(weight delta w.r.t bs=1)',
@@ -464,9 +490,11 @@ def plot_weight_deltas_cosine_norm_loss(cosines, losses, norms, keys, checkpoint
             f'Scene: {scene_name}. Checkpoint {checkpoint_iter}. Rescale betas: {rescale_betas}{disable_momentum_str}. LR scaling: {lr_scaling}. Warmup: {warmup_epochs} epochs. IID {iid_sampling}. Params: {k}')
         fig.tight_layout()
         os.makedirs(os.path.join('plots_grad_delta_new', scene_name), exist_ok=True)
-        fig.savefig(os.path.join('plots_grad_delta_new', scene_name,
+        fig_save_path = os.path.join('plots_grad_delta_new', scene_name,
                                  f'scene_{scene_name}_checkpoint_{checkpoint_iter}_param_{k.replace("_", "")}'
-                                 f'_rescale_betas_{rescale_betas}{disable_momentum_str.replace(" ", "_")}_lr_{lr_scaling}_warmup_{warmup_epochs}_iid_{iid_sampling}_test_losses.png'))
+                                 f'_rescale_betas_{rescale_betas}{disable_momentum_str.replace(" ", "_")}_lr_{lr_scaling}_warmup_{warmup_epochs}_iid_{iid_sampling}_test_losses.pdf')
+        fig.savefig(fig_save_path)
+        torch.save(save_dict, (fig_save_path + '.pt').replace('.pdf', ''))
         if k == '_xyz':
             fig.show()
         plt.close(fig)
@@ -535,21 +563,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     #                                    [7000, 15000, 30000])
     # quit()
 
-    # plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe, checkpoint, keys, num_trials=4, sampling='random')
+    #['random', 'random_wo_replacement']
+    # plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe, checkpoint, keys, num_trials=32, sampling='random_wo_replacement')
     # quit()
+
     # Run all experiments for first checkpoint first, then for second
-    for checkpoints_list in [[7000], [15000]]:
+    for checkpoints_list in [[7000], [15000], [30000]]:
         batch_sizes = [1, 4, 8, 16, 32, 64]
         run_epochs = 4
         # Optimal Defaults
-        iid_sampling = True
+        iid_sampling = False
         warmup_epochs = 2
         disable_momentum = False
         rescale_betas = True
         lr_scaling = 'sqrt'
 
         for lr_scaling in ['sqrt', 'constant', 'linear']:
-        # for lr_scaling in ['power-0.67', 'power-0.75']:
+            # for lr_scaling in ['power-0.67', 'power-0.75']:
             cosines_checkpoint, losses_checkpoint, test_losses_checkpoint, norms_checkpoint = compute_batch_size_vs_weights_delta(
                 dataset, opt, train_cameras, test_cameras, background, pipe, checkpoint, keys,
                 checkpoints_list=checkpoints_list, batch_sizes=batch_sizes,
@@ -559,25 +589,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 lr_scaling=lr_scaling,
                 iid_sampling=iid_sampling)
             for i in range(len(checkpoints_list)):
-                # plot_weight_deltas_cosine_norm_loss(cosines_checkpoint[i], losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
-                #                                     batch_sizes, rescale_betas, lr_scaling, warmup_epochs, disable_momentum, iid_sampling)
                 plot_weight_deltas_cosine_norm_loss(cosines_checkpoint[i], test_losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
                                                     batch_sizes, rescale_betas, lr_scaling, warmup_epochs, disable_momentum, iid_sampling)
         lr_scaling = 'sqrt'
 
-        # for rescale_betas in [False]:
-        #     cosines_checkpoint, losses_checkpoint, test_losses_checkpoint, norms_checkpoint = compute_batch_size_vs_weights_delta(
-        #         dataset, opt, train_cameras, test_cameras, background, pipe, checkpoint, keys,
-        #         checkpoints_list=checkpoints_list, batch_sizes=batch_sizes,
-        #         run_epochs=run_epochs, warmup_epochs=warmup_epochs,
-        #         rescale_betas=rescale_betas,
-        #         disable_momentum=disable_momentum,
-        #         lr_scaling=lr_scaling,
-        #         iid_sampling=iid_sampling)
-        #     for i in range(len(checkpoints_list)):
-        #         plot_weight_deltas_cosine_norm_loss(cosines_checkpoint[i], losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
-        #                                             batch_sizes, rescale_betas, lr_scaling, warmup_epochs, disable_momentum, iid_sampling)
-        # rescale_betas = True
+        for rescale_betas in [False]:
+            cosines_checkpoint, losses_checkpoint, test_losses_checkpoint, norms_checkpoint = compute_batch_size_vs_weights_delta(
+                dataset, opt, train_cameras, test_cameras, background, pipe, checkpoint, keys,
+                checkpoints_list=checkpoints_list, batch_sizes=batch_sizes,
+                run_epochs=run_epochs, warmup_epochs=warmup_epochs,
+                rescale_betas=rescale_betas,
+                disable_momentum=disable_momentum,
+                lr_scaling=lr_scaling,
+                iid_sampling=iid_sampling)
+            for i in range(len(checkpoints_list)):
+                plot_weight_deltas_cosine_norm_loss(cosines_checkpoint[i], test_losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
+                                                    batch_sizes, rescale_betas, lr_scaling, warmup_epochs, disable_momentum, iid_sampling)
+        rescale_betas = True
         #
         # for warmup_epochs in [0, 1]:
         #     cosines_checkpoint, losses_checkpoint, test_losses_checkpoint, norms_checkpoint = compute_batch_size_vs_weights_delta(
@@ -589,7 +617,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         #         lr_scaling=lr_scaling,
         #         iid_sampling=iid_sampling)
         #     for i in range(len(checkpoints_list)):
-        #         plot_weight_deltas_cosine_norm_loss(cosines_checkpoint[i], losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
+        #         plot_weight_deltas_cosine_norm_loss(cosines_checkpoint[i], test_losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
         #                                             batch_sizes, rescale_betas, lr_scaling, warmup_epochs, disable_momentum, iid_sampling)
         # warmup_epochs = 2
         #
@@ -603,11 +631,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         #         lr_scaling=lr_scaling,
         #         iid_sampling=iid_sampling)
         #     for i in range(len(checkpoints_list)):
-        #         plot_weight_deltas_cosine_norm_loss(cosines_checkpoint[i], losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
+        #         plot_weight_deltas_cosine_norm_loss(cosines_checkpoint[i], test_losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
         #                                             batch_sizes, rescale_betas, lr_scaling, warmup_epochs, disable_momentum, iid_sampling)
         # iid_sampling = True
         #
-        # for warmup_epochs in [0, 1, 2]:
+        # for warmup_epochs in [2]:
         #     for lr_scaling in ['sqrt', 'constant', 'linear']:
         #         disable_momentums = [False, True] if warmup_epochs == 2 else [False]
         #         for disable_momentum in disable_momentums:
@@ -621,8 +649,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         #                 lr_scaling=lr_scaling,
         #                 iid_sampling=iid_sampling)
         #             for i in range(len(checkpoints_list)):
-        #                 plot(cosines_checkpoint[i], losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
-        #                      batch_sizes, rescale_betas, lr_scaling, warmup_epochs, disable_momentum, iid_sampling)
+        #                 plot_weight_deltas_cosine_norm_loss(cosines_checkpoint[i], test_losses_checkpoint[i], norms_checkpoint[i], keys, checkpoints_list[i],
+        #                                                     batch_sizes, rescale_betas, lr_scaling, warmup_epochs, disable_momentum, iid_sampling)
     quit()
 
     for iteration in range(first_iter, opt.iterations + 1):
