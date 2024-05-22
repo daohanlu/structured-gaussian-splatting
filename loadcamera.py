@@ -4,7 +4,7 @@ def decode_binary_file(infile):
     with open(infile, 'rb') as f:
         data = f.read()
     # Define the format string for struct.unpack
-    format_string = '=B f f f H H f f f f f f f f f f f'
+    format_string = '>B f f f H H f f f f f f f f f f f'
 
     # Unpack the data
     unpacked_data = struct.unpack(format_string, data)
