@@ -457,7 +457,8 @@ def compute_batch_size_vs_weights_delta(dataset, opt, train_cameras, test_camera
 def plot_weight_deltas_cosine_norm_loss(cosines, losses, norms, keys, checkpoint_iter, batch_sizes, rescale_betas: bool, lr_scaling: str,
                                         warmup_epochs: int, disable_momentum: bool, iid_sampling: bool):
     scene_name = os.path.basename(args.source_path)
-    save_dict = {'cosines_checkpoint': cosines,
+    save_dict = {'scene_name': scene_name,
+                 'cosines_checkpoint': cosines,
                  'test_losses_checkpoint': losses,
                  'norms_checkpoint': norms,
                  'keys': keys,
