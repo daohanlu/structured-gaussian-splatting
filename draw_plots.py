@@ -39,7 +39,7 @@ def fill_subplot(ax, title, xs, ys, xlabel, ylabel, xscale='linear', legend_labe
     if legend_labels != '':
         # ax.legend(bbox_to_anchor=(1.0, 1.0))
         ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.12),
-                  ncol=3, fancybox=True, shadow=True)
+                  ncol=3, fancybox=True)
 
 
 def plot_lr_ablation(lr_results_dict: Dict[str, Result], keys, batch_sizes, batch_sizes_to_plot=[4, 16, 64]):

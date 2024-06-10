@@ -218,6 +218,7 @@ def plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe,
                                   iters_list=[7000, 15000, 30000], sampling='random'):
     accum_steps = len(train_cameras)
     random.seed()
+    scene_name = os.path.basename(args.source_path)
     variances: List[Dict[str: np.array]] = []
     sparsities: List[Dict[str: np.array]] = []
     cosines: List[Dict[str: np.array]] = []
@@ -234,6 +235,16 @@ def plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe,
         cosines.append(c)
         SNRs.append(snrs)
 
+    save_dict = {'scene_name': scene_name,
+                 'cosines_checkpoint': cosines,
+                 'sparsities_checkpoint': sparsities,
+                 'variances_checkpoint': variances,
+                 'SNRs_checkpoint': SNRs,
+                 'keys': keys,
+                 'num_trails': num_trials,
+                 'iters_list': iters_list,
+                 'sampling': sampling}
+
     scene_name = os.path.basename(args.source_path)
     for k in keys:
         ncols = 3
@@ -249,35 +260,12 @@ def plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe,
             fill_subplot(ax[2], 'Batch size vs Grad Precision', xs,
                          1/variances[i][k],
                          'Batch size', '1/(Avg Parameter Variance)', xscale='linear', legend_labels='iter ' + str(iter))
-            # fill_subplot(ax[2], 'Batch size vs Cosine Sim. with Full-Batch Grad', xs,
-            #              cosines[i][k],
-            #              'Batch size', 'Cosine Similarity', xscale='linear', legend_labels='iter ' + str(iter))
-            # Ignore the last value because full-batch SNR is infinite
-            # fill_subplot(ax[3], 'Batch size vs grad SNR', xs[:-10],
-            #              SNRs[i][k][:-10],
-            #              'Batch size', 'SNR', xscale='linear', legend_labels='iter ' + str(iter))
-            # # Ignore the last value because full-batch SNR is infinite
-            # fill_subplot(ax[4], 'Batch size vs grad NSR', xs[:-10],
-            #              1 / SNRs[i][k][:-10],
-            #              'Batch size', 'NSR', xscale='linear', legend_labels='iter ' + str(iter))
-        # for i, iter in enumerate(iters_list):
-        #     fill_subplot(ax[2], 'Batch size vs Grad sqrt(Precision)', xs,
-        #                  (1 / variances[i][k] ** 0.5) * (np.arange(accum_steps) ** 0.5),
-        #                  '', '', xscale='linear',
-        #                  legend_labels='iter ' + str(iter) + '* sqrt(batch size)')
-        #     fill_subplot(ax[2], 'Batch size vs Grad sqrt(Precision)', xs,
-        #                  (1 / variances[i][k] ** 0.5) * (np.arange(accum_steps) ** 0.667),
-        #                  '', '', xscale='linear',
-        #                  legend_labels='iter ' + str(iter) + '* (batch size)**(0.667)')
-        #     fill_subplot(ax[2], 'Batch size vs Grad sqrt(Precision)', xs,
-        #                  (1 / variances[i][k] ** 0.5) * (np.arange(accum_steps) ** 0.75),
-        #                  '', '', xscale='linear',
-        #                  legend_labels='iter ' + str(iter) + '* (batch size)**(0.75))')
-        fig.suptitle(f'Scene: {scene_name}. Param group: {k.replace("_", "")}.')
+        # fig.suptitle(f'Scene: {scene_name}. Param group: {k.replace("_", "")}.')
         fig.tight_layout()
         os.makedirs(os.path.join('plots_snr', scene_name), exist_ok=True)
-        fig.savefig(os.path.join('plots_snr', scene_name,
-                                 f'scene_{scene_name}_param_{k.replace("_", "")}_sampling_{sampling}_trials_{num_trials}.pdf'))
+        fig_save_path = os.path.join('plots_snr', scene_name, f'scene_{scene_name}_param_{k.replace("_", "")}_sampling_{sampling}_trials_{num_trials}.pdf')
+        fig.savefig(fig_save_path)
+        torch.save(save_dict, (fig_save_path.rstrip('.pdf') + '.pt'))
         fig.show()
         plt.close(fig)
 
@@ -495,7 +483,7 @@ def plot_weight_deltas_cosine_norm_loss(cosines, losses, norms, keys, checkpoint
                                  f'scene_{scene_name}_checkpoint_{checkpoint_iter}_param_{k.replace("_", "")}'
                                  f'_rescale_betas_{rescale_betas}{disable_momentum_str.replace(" ", "_")}_lr_{lr_scaling}_warmup_{warmup_epochs}_iid_{iid_sampling}_test_losses.pdf')
         fig.savefig(fig_save_path)
-        torch.save(save_dict, (fig_save_path + '.pt').replace('.pdf', ''))
+        torch.save(save_dict, (fig_save_path.rstrip('.pdf') + '.pt'))
         if k == '_xyz':
             fig.show()
         plt.close(fig)
@@ -565,7 +553,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # quit()
 
     #['random', 'random_wo_replacement']
-    # plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe, checkpoint, keys, num_trials=32, sampling='random_wo_replacement')
+    plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe, checkpoint, keys, num_trials=32, sampling='random_wo_replacement')
     # quit()
 
     # Run all experiments for first checkpoint first, then for second
