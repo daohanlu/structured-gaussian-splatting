@@ -104,14 +104,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             pipe.debug = True
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
-        if cv2_key == ord('n'):
-            latent_noise = 10.0*torch.randn((1, gaussians.latent_size), device=gaussians.structure_latents.device, dtype=gaussians.structure_latents.dtype)
-        elif cv2_key == ord('q'):
+        if cv2_key == ord('q'):
             break
-        else:
-            latent_noise = None
+        latent_noise = torch.randn((1, gaussians.latent_size), device=gaussians.structure_latents.device, dtype=gaussians.structure_latents.dtype) * 0
 
-        gaussians.forward(latent_noise=latent_noise)
+        gaussians.forward()
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], \
         render_pkg["visibility_filter"], render_pkg["radii"]
@@ -126,13 +123,31 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if debug_latent:
             gt = gt_image.cpu().numpy().transpose(1, 2, 0)
             rendered = torch.clip(image.detach(), 0.0, 1.0).cpu().numpy().transpose(1, 2, 0)
-            print(gt[0, 0, :])
-            print(rendered[0, 0, :])
-            # import pdb
-            # pdb.set_trace()
             cv2.imshow("render", cv2.cvtColor(rendered, cv2.COLOR_RGB2BGR))
             cv2.imshow("ground truth", cv2.cvtColor(gt, cv2.COLOR_RGB2BGR))
             cv2_key = cv2.waitKey(0)
+            while cv2_key != ord('c'):
+                if cv2_key == ord('n'):
+                    latent_noise = torch.randn((1, gaussians.latent_size), device=gaussians.structure_latents.device, dtype=gaussians.structure_latents.dtype)
+                elif cv2_key == ord('p'):
+                    latent_noise *= 1.414
+                elif cv2_key == ord('m'):
+                    latent_noise /= 1.414
+                if torch.linalg.norm(latent_noise) > 0:
+                    print('Noise norm', torch.linalg.norm(latent_noise))
+                with torch.no_grad():
+                    gaussians.forward(latent_noise=latent_noise)
+                    render_pkg = render(viewpoint_cam, gaussians, pipe, bg)
+                    image_2, _, _, _ = render_pkg["render"], render_pkg[
+                        "viewspace_points"], \
+                        render_pkg["visibility_filter"], render_pkg["radii"]
+                gt = gt_image.cpu().numpy().transpose(1, 2, 0)
+                rendered = torch.clip(image_2.detach(), 0.0, 1.0).cpu().numpy().transpose(1, 2, 0)
+                # import pdb
+                # pdb.set_trace()
+                cv2.imshow("render", cv2.cvtColor(rendered, cv2.COLOR_RGB2BGR))
+                cv2.imshow("ground truth", cv2.cvtColor(gt, cv2.COLOR_RGB2BGR))
+                cv2_key = cv2.waitKey(0)
 
         with torch.no_grad():
             # Progress bar
