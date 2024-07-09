@@ -44,7 +44,10 @@ class Scene:
         self.train_cameras = {}
         self.test_cameras = {}
 
-        if os.path.exists(os.path.join(args.source_path, "sparse")):
+        if os.path.exists(os.path.join(args.source_path, "mesh3d.ply")):
+            print("Found mesh3d.ply file, assuming Mesh data set!")
+            scene_info = sceneLoadTypeCallbacks["Mesh"](args.source_path, args.white_background, args.eval, decimate_factor=args.decimate_factor)
+        elif os.path.exists(os.path.join(args.source_path, "sparse")):
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")

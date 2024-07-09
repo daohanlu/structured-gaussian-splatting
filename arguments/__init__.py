@@ -52,8 +52,10 @@ class ModelParams(ParamGroup):
         self._images = "images"
         self._resolution = -1
         self._white_background = False
+        self.decimate_factor = 1.0
         self.data_device = "cuda"
-        self.eval = False
+        self.eval = True
+        self.freeze_xyz = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

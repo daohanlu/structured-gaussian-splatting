@@ -262,7 +262,62 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
                            ply_path=ply_path)
     return scene_info
 
+
+def readMeshSyntheticInfo(path, white_background, eval, extension=".png", decimate_factor=None):
+    print("Reading Training Transforms")
+    train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", white_background, extension)
+    print("Reading Test Transforms")
+    test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json", white_background, extension)
+
+    if not eval:
+        train_cam_infos.extend(test_cam_infos)
+        test_cam_infos = []
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    import open3d as o3d
+    mesh_path = os.path.join(path, "mesh3d.ply")
+    ply_path = os.path.join(path, "points3d.ply")
+    mesh = o3d.io.read_triangle_mesh(mesh_path, enable_post_processing=True)  # Read mesh
+    # mesh = o3d.io.read_triangle_model(mesh_path)
+    if decimate_factor != 1.0:
+        mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=int(len(mesh.triangles) / decimate_factor))
+
+    print(mesh)
+    print('Vertices:')
+    print(np.asarray(mesh.vertices).shape, np.asarray(mesh.vertices))
+    print('Triangles:')
+    print(np.asarray(mesh.triangles).shape, np.asarray(mesh.triangles))
+    print("Try to render a mesh with normals (exist: " +
+          str(mesh.has_vertex_normals()) + ") and colors (exist: " +
+          str(mesh.has_vertex_colors()) + ")")
+    mesh.compute_triangle_normals()
+    o3d.visualization.draw_geometries([mesh])
+    # o3d.visualization.draw([mesh])
+    vertices = np.asarray(mesh.vertices)
+    triangles = np.asarray(mesh.triangles)
+    xyz = np.zeros((len(triangles), 3), dtype=np.float32)
+    batch_size = 1024
+    for i in range(0, len(triangles), batch_size):
+        centroids = vertices[triangles[i: i + batch_size]]
+
+        centroids = np.mean(centroids, axis=1)
+        xyz[i:i + batch_size] = centroids
+    print('init xyz', xyz.shape, xyz)
+    shs = np.float32(np.random.random((len(triangles), 3)) / 255.0)
+    storePly(ply_path, xyz, SH2RGB(shs) * 255.0)
+    pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((len(triangles), 3)))
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path)
+    return scene_info
+
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
-    "Blender" : readNerfSyntheticInfo
+    "Blender" : readNerfSyntheticInfo,
+    "Mesh" : readMeshSyntheticInfo,
 }

@@ -59,6 +59,11 @@ class GaussianModel:
         self.spatial_lr_scale = 0
         self.setup_functions()
 
+        self.freeze_means = False
+        self.freeze_scales = False
+        self.freeze_rotations = False
+        self.freeze_opacities = False
+
     def capture(self):
         return (
             self.active_sh_degree,
@@ -95,15 +100,18 @@ class GaussianModel:
 
     @property
     def get_scaling(self):
-        return self.scaling_activation(self._scaling)
+        scales = self.scaling_activation(self._scaling)
+        return scales if not self.freeze_scales else scales.detach()
     
     @property
     def get_rotation(self):
-        return self.rotation_activation(self._rotation)
+        rots = self.rotation_activation(self._rotation)
+        return rots if not self.freeze_rotations else rots.detach()
     
     @property
     def get_xyz(self):
-        return self._xyz
+        xyz = self._xyz
+        return xyz if not self.freeze_means else xyz.detach()
     
     @property
     def get_features(self):
@@ -113,7 +121,8 @@ class GaussianModel:
     
     @property
     def get_opacity(self):
-        return self.opacity_activation(self._opacity)
+        opacity = self.opacity_activation(self._opacity)
+        return opacity if not self.freeze_opacities else opacity.detach()
     
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
