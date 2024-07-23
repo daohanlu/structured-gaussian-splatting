@@ -63,8 +63,7 @@ def get_full_batch_gradients(gaussians: GaussianModel, viewpoint_stack, backgrou
 def get_grad_stats(gaussians: GaussianModel, viewpoint_stack, background, pipe, opt, grad_keys,
                    sampling: str = "random",
                    accum_steps: int = 1, determininstic_index: int = None,
-                   monitor_params: Tuple[str, List[int]] = None) -> Tuple[
-    torch.Tensor, Dict[str, np.array], Dict[str, np.array], Dict[str, np.array], Dict[str, np.array]]:
+                   monitor_params: Tuple[str, List[int]] = None):
     assert sampling in ["random", "random_wo_replacement", "nearby", ""]
     cam_indices = None
 
@@ -84,6 +83,8 @@ def get_grad_stats(gaussians: GaussianModel, viewpoint_stack, background, pipe, 
     variances = {k: [] for k in grad_keys}
     cosines = {k: [] for k in grad_keys}
     SNRs = {k: [] for k in grad_keys}
+    means = {k: [] for k in grad_keys}
+    squares = {k: [] for k in grad_keys}
     target_grad = get_full_batch_gradients(gaussians, viewpoint_stack, background, pipe, opt, grad_keys)
 
     gaussians.optimizer.zero_grad(set_to_none=True)
@@ -114,13 +115,18 @@ def get_grad_stats(gaussians: GaussianModel, viewpoint_stack, background, pipe, 
                 sparsities[k].append(float(get_sparsity(grad_running_sum[k])))
                 cosines[k].append(
                     float(torch.nn.functional.cosine_similarity(sample, signal, dim=0)))
+                means[k].append(float(sample.mean()))
+                squares[k].append(float((sample**2).mean()))
 
         gaussians.optimizer.zero_grad(set_to_none=True)
+
     sparsities_np = {k: np.array(v) for k, v in sparsities.items()}
     variances_np = {k: np.array(v) for k, v in variances.items()}
     cosines_np = {k: np.array(v) for k, v in cosines.items()}
     SNRs_np = {k: np.array(v) for k, v in SNRs.items()}
-    return grad_running_sum, sparsities_np, variances_np, cosines_np, SNRs_np
+    means_np = {k: np.array(v) for k, v in means.items()}
+    squares_np = {k: np.array(v) for k, v in squares.items()}
+    return grad_running_sum, sparsities_np, variances_np, cosines_np, SNRs_np, means_np, squares_np
 
 
 def get_sparsity(grad: torch.Tensor) -> torch.Tensor:
@@ -201,17 +207,19 @@ def get_variance_sparsity_cosine_SNR(gaussians, train_cameras, background, pipe,
     variances = {k: 0 for k in keys}
     cosines = {k: 0 for k in keys}
     SNRs = {k: 0 for k in keys}
+    means = {k: 0 for k in keys}
+    squares = {k: 0 for k in keys}
     for trial in tqdm(range(num_trials)):
-        grads_runing_sum, s, v, c, snrs = get_grad_stats(gaussians, train_cameras, background, pipe, opt, keys,
+        grads_runing_sum, s, v, c, snrs, m, sq = get_grad_stats(gaussians, train_cameras, background, pipe, opt, keys,
                                                          sampling=sampling, accum_steps=accum_steps)
-        # grads_runing_sum, s, v, c = get_grad_stats(gaussians, train_cameras, background, pipe, opt, keys,
-        #                                         sampling="", accum_steps=accum_steps, determininstic_index=0)
         for k in keys:
             sparsities[k] += s[k] / num_trials
             variances[k] += v[k] / num_trials
             cosines[k] += c[k] / num_trials
             SNRs[k] += snrs[k] / num_trials
-    return variances, sparsities, cosines, SNRs
+            means[k] += m[k] / num_trials
+            squares[k] += sq[k] / num_trials
+    return variances, sparsities, cosines, SNRs, means, squares
 
 
 def plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe, checkpoint, keys, num_trials=32,
@@ -223,22 +231,28 @@ def plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe,
     sparsities: List[Dict[str: np.array]] = []
     cosines: List[Dict[str: np.array]] = []
     SNRs: List[Dict[str: np.array]] = []
+    means: List[Dict[str: np.array]] = []
+    squares: List[Dict[str: np.array]] = []
     for iter in iters_list:
         chpt = checkpoint.rstrip(".pth").split("chkpnt")[1]
         print('loading checkpoint ', checkpoint.replace("chkpnt" + str(chpt), "chkpnt" + str(iter)))
         (model_params, first_iter) = torch.load(checkpoint.replace("chkpnt" + str(chpt), "chkpnt" + str(iter)))
         gaussians = restored_gaussians(model_params, dataset, opt)
-        v, s, c, snrs = get_variance_sparsity_cosine_SNR(gaussians, train_cameras, background, pipe, opt, keys,
+        v, s, c, snrs, m, sq = get_variance_sparsity_cosine_SNR(gaussians, train_cameras, background, pipe, opt, keys,
                                                          num_trials, accum_steps, sampling=sampling)
         variances.append(v)
         sparsities.append(s)
         cosines.append(c)
         SNRs.append(snrs)
+        means.append(m)
+        squares.append(sq)
 
     save_dict = {'scene_name': scene_name,
                  'cosines_checkpoint': cosines,
                  'sparsities_checkpoint': sparsities,
                  'variances_checkpoint': variances,
+                 'means_checkpoint': means,
+                 'squares_checkpoint': squares,
                  'SNRs_checkpoint': SNRs,
                  'keys': keys,
                  'num_trails': num_trials,
@@ -554,7 +568,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     #['random', 'random_wo_replacement']
     plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe, checkpoint, keys, num_trials=32, sampling='random_wo_replacement')
-    # quit()
+    quit()
 
     # Run all experiments for first checkpoint first, then for second
     for checkpoints_list in [[7000], [15000], [30000]]:
