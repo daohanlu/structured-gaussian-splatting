@@ -12,6 +12,8 @@
 import os
 import torch
 from random import randint
+
+from scene.my_gaussian_model import MyGaussianModel
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
 import sys
@@ -30,6 +32,8 @@ except ImportError:
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
+    if checkpoint == '':
+        raise ValueError("checkpoint not set")
     tb_writer = prepare_output_and_logger(dataset, opt)
     tsv_writer = open(os.path.join(dataset.model_path, 'losses.tsv'), 'w')
     tsv_writer.write('iteration\ttest_l1\ttest_psnr\tnum_gaussians\n')
@@ -37,11 +41,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     if checkpoint:
-        (model_params, first_iter) = torch.load(checkpoint)
-        gaussians.restore(model_params, opt)
+        try:
+            (model_params, first_iter) = torch.load(checkpoint)
+            gaussians.restore(model_params, opt)
+        except ValueError:
+            vectorized = torch.load(checkpoint)
+            first_iter = 0
+            gaussians = MyGaussianModel.from_vector(0, vectorized[:, :11], vectorized[:, 11:])
+            scene.gaussians = gaussians
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+    with torch.no_grad():
+        # Log and save
+        training_report(None, tsv_writer, 0, 0.0, 0, l1_loss, 0.0,
+                        [0], scene, render, (pipe, background))
+    quit()
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
@@ -61,20 +76,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     print('Freeze xyz', gaussians.freeze_means)
 
     for iteration in range(first_iter, opt.iterations + 1):
-        # if network_gui.conn == None:
-        #     network_gui.try_connect()
-        # while network_gui.conn != None:
-        #     try:
-        #         net_image_bytes = None
-        #         custom_cam, do_training, pipe.convert_SHs_python, pipe.compute_cov3D_python, keep_alive, scaling_modifer = network_gui.receive()
-        #         if custom_cam != None:
-        #             net_image = render(custom_cam, gaussians, pipe, background, scaling_modifer)["render"]
-        #             net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
-        #         network_gui.send(net_image_bytes, dataset.source_path)
-        #         if do_training and ((iteration < int(opt.iterations)) or not keep_alive):
-        #             break
-        #     except Exception as e:
-        #         network_gui.conn = None
+        if network_gui.conn == None:
+            network_gui.try_connect()
+        while network_gui.conn != None:
+            try:
+                net_image_bytes = None
+                custom_cam, do_training, pipe.convert_SHs_python, pipe.compute_cov3D_python, keep_alive, scaling_modifer = network_gui.receive()
+                if custom_cam != None:
+                    net_image = render(custom_cam, gaussians, pipe, background, scaling_modifer)["render"]
+                    net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
+                network_gui.send(net_image_bytes, dataset.source_path)
+                if do_training and ((iteration < int(opt.iterations)) or not keep_alive):
+                    break
+            except Exception as e:
+                network_gui.conn = None
 
         iter_start.record()
 
@@ -181,7 +196,7 @@ def training_report(tb_writer, tsv_writer, iteration, Ll1, loss, l1_loss, elapse
     if iteration in testing_iterations:
         torch.cuda.empty_cache()
         validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()},
-                              {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30)]})
+                              {'name': 'train', 'cameras' : scene.getTrainCameras()})
 
         for config in validation_configs:
             if config['cameras'] and len(config['cameras']) > 0:
@@ -194,19 +209,18 @@ def training_report(tb_writer, tsv_writer, iteration, Ll1, loss, l1_loss, elapse
                         tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
                         if iteration == testing_iterations[0]:
                             tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
-                    import cv2;
-                    cv2.imshow(config['name'] + ' image gt', (gt_image.permute((1, 2, 0)) * 255).to(torch.uint8).cpu().numpy())
-                    cv2.imshow(config['name'] + ' image', (image.permute((1, 2, 0)) * 255).to(torch.uint8).cpu().numpy())
-                    cv2.waitKey(1)
+                    # import cv2;
+                    # cv2.imshow(config['name'] + ' image gt', (gt_image.permute((1, 2, 0)) * 255).to(torch.uint8).cpu().numpy())
+                    # cv2.imshow(config['name'] + ' image', (image.permute((1, 2, 0)) * 255).to(torch.uint8).cpu().numpy())
+                    # cv2.waitKey(0)
                     l1_test += l1_loss(image, gt_image).mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
                 psnr_test /= len(config['cameras'])
                 l1_test /= len(config['cameras'])
-                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {} #Images {}".format(iteration, config['name'], l1_test, psnr_test, len(config['cameras'])))
                 print('# of Gaussians:', len(scene.gaussians.get_xyz))
                 if config['name'] == 'test':
                     tsv_writer.write(f'{iteration}\t{l1_test}\t{psnr_test}\t{len(scene.gaussians.get_xyz)}\n')
-                    print(f'{iteration}\t{l1_test}\t{psnr_test}\t{len(scene.gaussians.get_xyz)}\n')
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
@@ -222,7 +236,7 @@ if __name__ == "__main__":
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
-    save_iters = [1_000, 7_000, 15_000, 30_000]
+    save_iters = [1, 1_000, 4_500, 7_000, 11_000, 15_000, 20_000, 25_000, 30_000]
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)

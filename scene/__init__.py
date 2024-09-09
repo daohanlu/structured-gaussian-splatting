@@ -47,6 +47,9 @@ class Scene:
         if os.path.exists(os.path.join(args.source_path, "mesh3d.ply")):
             print("Found mesh3d.ply file, assuming Mesh data set!")
             scene_info = sceneLoadTypeCallbacks["Mesh"](args.source_path, args.white_background, args.eval, decimate_factor=args.decimate_factor)
+        elif os.path.exists(os.path.join(args.source_path, "000.npy")):
+            print("Found 000.npy, assuming zero123 dataset!")
+            scene_info = sceneLoadTypeCallbacks["Zero123"](args.source_path, args.white_background, args.eval, obj_path=args.obj_path, mesh_max_faces=args.mesh_max_faces)
         elif os.path.exists(os.path.join(args.source_path, "sparse")):
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):

@@ -53,6 +53,8 @@ class ModelParams(ParamGroup):
         self._resolution = -1
         self._white_background = False
         self.decimate_factor = 1.0
+        self.mesh_max_faces = 16_000
+        self.obj_path = ""
         self.data_device = "cuda"
         self.eval = True
         self.freeze_xyz = False
@@ -67,6 +69,7 @@ class PipelineParams(ParamGroup):
     def __init__(self, parser):
         self.convert_SHs_python = False
         self.compute_cov3D_python = False
+        self.no_tqdm = False
         self.debug = False
         super().__init__(parser, "Pipeline Parameters")
 

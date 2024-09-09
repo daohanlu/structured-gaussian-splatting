@@ -4,7 +4,7 @@ import numpy as np
 
 import torch
 
-from gaussian_model import GaussianModel
+from .gaussian_model import GaussianModel
 
 
 class MyGaussianModel(GaussianModel):

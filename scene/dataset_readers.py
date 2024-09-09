@@ -8,9 +8,11 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
-
+import glob
 import os
 import sys
+from scipy.spatial.transform import Rotation
+
 from PIL import Image
 from typing import NamedTuple
 from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, \
@@ -226,6 +228,59 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             
     return cam_infos
 
+
+def readCamerasFromZero123(path, white_background, extension=".png", train_split=True):
+    cam_infos = []
+    image_files = sorted(list(glob.glob(os.path.join(path, '*' + extension))))
+    if train_split:
+        image_files = image_files[:10]
+    else:
+        image_files = image_files[10:]
+
+    for idx, frame_path in enumerate(image_files):
+        npy_file = frame_path.replace(extension, ".npy")
+        # Zero123 uses the "3x4 RT matrix from Blender". I think it's [R|T]
+        # https://github.com/cvlab-columbia/zero123/blob/main/objaverse-rendering/scripts/blender_script.py
+        blender_RT = np.load(npy_file)
+        # blender_RT = np.concatenate((blender_RT, [[0, 0, 0, 1]]), axis=0)
+        cam_name = str(frame_path)
+
+        # NeRF 'transform_matrix' is a camera-to-world transform
+        c2w = blender_RT
+        # change from OpenGL/Blender camera axes (Y up, Z back) to COLMAP (Y down, Z forward)
+        # c2w[:3, 1:3] *= -1
+        # c2w[:3, :3] = Rotation.from_euler('xyz', [90, 0, 0], degrees=True).as_matrix().T @ c2w[:3,:3]
+        c2w[1:3, :3] *= -1
+        # c2w[:3, :3] = Rotation.from_euler('xyz', [0, 45, 90], degrees=True).as_matrix() @ c2w[:3, :3]
+
+        # get the world-to-camera transform and set R, T
+        # w2c = np.linalg.inv(c2w)
+        w2c = c2w
+        R = np.transpose(w2c[:3, :3])  # R is stored transposed due to 'glm' in CUDA code
+        T = -w2c[:3, 3]
+
+        image_path = os.path.join(path, cam_name)
+        image_name = Path(cam_name).stem
+        image = Image.open(image_path)
+
+        im_data = np.array(image.convert("RGBA"))
+
+        bg = np.array([1, 1, 1]) if white_background else np.array([0, 0, 0])
+
+        norm_data = im_data / 255.0
+        arr = norm_data[:, :, :3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
+        image = Image.fromarray(np.array(arr * 255.0, dtype=np.byte), "RGB")
+
+        # blender camera intrinsics:
+        # https://github.com/cvlab-columbia/zero123/blob/f426883b1a7353d91ddc34a551dd91b6223e4ce8/objaverse-rendering/scripts/blender_script.py#L62
+        FovY = focal2fov(35, 32)
+        FovX = focal2fov(35, 32)
+
+        cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
+                                    image_path=image_path, image_name=image_name, width=image.size[0],
+                                    height=image.size[1]))
+    return cam_infos
+
 def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
     print("Reading Training Transforms")
     train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", white_background, extension)
@@ -263,11 +318,37 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
     return scene_info
 
 
-def readMeshSyntheticInfo(path, white_background, eval, extension=".png", decimate_factor=None):
-    print("Reading Training Transforms")
-    train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", white_background, extension)
-    print("Reading Test Transforms")
-    test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json", white_background, extension)
+def normalize_points(pts: np.array):
+    bbox_max = np.max(pts, axis=0)
+    bbox_min = np.min(pts, axis=0)
+    print('bbox_max', bbox_max)
+    print('bbox_min', bbox_min)
+    # center
+    offset = -(bbox_min + bbox_max) / 2
+    pts += offset[np.newaxis, :]
+    # scale
+    scale = 1 / (bbox_max - bbox_min).max()
+    pts *= scale
+    print('offset', -(np.max(pts, axis=0) + np.min(pts, axis=0)) / 2)
+    input()
+    return pts
+
+
+def readMeshSyntheticInfo(path, white_background, eval, obj_path=None, extension=".png", decimate_factor=1.0, mesh_max_faces=-1):
+    if obj_path is not None:
+        # Zero123 dataset
+        print("Reading Training Transforms")
+        train_cam_infos = readCamerasFromZero123(path, white_background, extension, train_split=True)
+        print("Reading Test Transforms")
+        test_cam_infos = readCamerasFromZero123(path, white_background, extension, train_split=False)
+    else:
+        # NeRF Synthetic Datset with obj
+        raise NotImplementedError()
+        print("Reading Training Transforms")
+        train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", white_background, extension)
+        print("Reading Test Transforms")
+        test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json", white_background, extension)
+
 
     if not eval:
         train_cam_infos.extend(test_cam_infos)
@@ -276,37 +357,59 @@ def readMeshSyntheticInfo(path, white_background, eval, extension=".png", decima
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
     import open3d as o3d
-    mesh_path = os.path.join(path, "mesh3d.ply")
+    if obj_path != "":
+        mesh_path = obj_path
+    else:
+        mesh_path = os.path.join(path, "mesh3d.ply")
     ply_path = os.path.join(path, "points3d.ply")
-    mesh = o3d.io.read_triangle_mesh(mesh_path, enable_post_processing=True)  # Read mesh
-    # mesh = o3d.io.read_triangle_model(mesh_path)
-    if decimate_factor != 1.0:
-        mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=int(len(mesh.triangles) / decimate_factor))
+    # mesh = o3d.io.read_triangle_mesh(mesh_path, enable_post_processing=True)  # Read mesh
+    tri_model = o3d.io.read_triangle_model(mesh_path)
+    xyzs = []
+    for mesh_info in tri_model.meshes:
+        print('adding mesh with name', mesh_info.mesh_name)
+        mesh = mesh_info.mesh
+        assert decimate_factor == 1.0 or mesh_max_faces == -1, "Decimate factor and mesh_max_faces are mutually exclusive"
+        if decimate_factor != 1.0:
+            mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=int(len(mesh.triangles) / decimate_factor))
+            # if len(mesh.triangles) > mesh_max_faces:
+            #     mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=mesh_max_faces)
+        vertices = np.asarray(mesh.vertices)
+        triangles = np.asarray(mesh.triangles)
+        xyz = np.zeros((len(triangles), 3), dtype=np.float32)
+        batch_size = 1024
+        for i in range(0, len(triangles), batch_size):
+            centroids = vertices[triangles[i: i + batch_size]]
+            centroids = np.mean(centroids, axis=1)
+            xyz[i:i + batch_size] = centroids
+        xyzs.append(xyz)
+    xyzs: np.array = np.concatenate(xyzs, axis=0)
+    if mesh_max_faces != -1:
+        if len(xyzs) > mesh_max_faces:
+            quit()
+    with open(obj_path.replace('.glb', '_normalization.json'), 'r') as f:
+        normalization_dict: dict = json.load(f)
+    xyzs *= float(normalization_dict["scale"])
+    offset = np.array(normalization_dict["offset"])[np.newaxis, :]
+    xyzs += offset
+    xyzs = xyzs[:, [0, 2, 1]]
+    xyzs[:, 1] *= -1
 
-    print(mesh)
-    print('Vertices:')
-    print(np.asarray(mesh.vertices).shape, np.asarray(mesh.vertices))
-    print('Triangles:')
-    print(np.asarray(mesh.triangles).shape, np.asarray(mesh.triangles))
-    print("Try to render a mesh with normals (exist: " +
-          str(mesh.has_vertex_normals()) + ") and colors (exist: " +
-          str(mesh.has_vertex_colors()) + ")")
-    mesh.compute_triangle_normals()
-    o3d.visualization.draw_geometries([mesh])
-    # o3d.visualization.draw([mesh])
-    vertices = np.asarray(mesh.vertices)
-    triangles = np.asarray(mesh.triangles)
-    xyz = np.zeros((len(triangles), 3), dtype=np.float32)
-    batch_size = 1024
-    for i in range(0, len(triangles), batch_size):
-        centroids = vertices[triangles[i: i + batch_size]]
+    # xyzs = normalize_points(xyzs)
+    # print('Vertices:', np.asarray(mesh.vertices).shape)
+    # print('Triangles:', np.asarray(mesh.triangles).shape)
+    # print("Try to render a mesh with normals (exist: " +
+    #       str(mesh.has_vertex_normals()) + ") and colors (exist: " +
+    #       str(mesh.has_vertex_colors()) + ")")
+    # mesh.compute_triangle_normals()
+    # o3d.visualization.draw_geometries([mesh])
 
-        centroids = np.mean(centroids, axis=1)
-        xyz[i:i + batch_size] = centroids
-    print('init xyz', xyz.shape, xyz)
-    shs = np.float32(np.random.random((len(triangles), 3)) / 255.0)
-    storePly(ply_path, xyz, SH2RGB(shs) * 255.0)
-    pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((len(triangles), 3)))
+    # for an entire model
+    # o3d.visualization.draw([tri_model])
+
+    # print('init xyzs', xyzs.shape, xyzs)
+    shs = np.float32(np.random.random((len(xyzs), 3)) / 255.0)
+    storePly(ply_path, xyzs, SH2RGB(shs) * 255.0)
+    pcd = BasicPointCloud(points=xyzs, colors=SH2RGB(shs), normals=np.zeros((len(xyzs), 3)))
 
     scene_info = SceneInfo(point_cloud=pcd,
                            train_cameras=train_cam_infos,
@@ -320,4 +423,5 @@ sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
     "Blender" : readNerfSyntheticInfo,
     "Mesh" : readMeshSyntheticInfo,
+    "Zero123": readMeshSyntheticInfo,
 }

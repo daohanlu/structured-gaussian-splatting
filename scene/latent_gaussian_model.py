@@ -13,7 +13,7 @@ from simple_knn._C import distCUDA2
 def _standardize_quaternion(quaternions: torch.Tensor) -> torch.Tensor:
     """
     Convert a unit quaternion to a standard form: one in which the real
-    part is non negative.
+    part is non negative.f
 
     Args:
         quaternions: Quaternions with real part first,
