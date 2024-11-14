@@ -53,7 +53,8 @@ green = '#2ca02c'
 orange = '#ff7f0e'
 
 
-def plot_lr_ablation(lr_results_dict: Dict[str, Result], keys, batch_sizes, batch_sizes_to_plot=[4, 16, 64]):
+def plot_lr_ablation(lr_results_dict: Dict[str, Result], keys, batch_sizes,
+                     out_dir, out_scene_name, iteration: int, batch_sizes_to_plot=[4, 16, 64]):
     batch_sizes_to_plot = [4, 16, 32]
     print(lr_results_dict.keys())
     ncols = 2
@@ -121,8 +122,8 @@ def plot_lr_ablation(lr_results_dict: Dict[str, Result], keys, batch_sizes, batc
             # fig.suptitle(
             #     f'Scene: {scene_name}. Checkpoint {checkpoint_iter}. Rescale betas: {rescale_betas}{disable_momentum_str}. LR scaling: {lr_scaling}. Warmup: {warmup_epochs} epochs. IID {iid_sampling}. Params: {k}')
         # fig.tight_layout()
-        os.makedirs(os.path.join('paper_figures', 'rubble'), exist_ok=True)
-        fig_save_path = os.path.join('paper_figures', 'rubble', 'rubble_lr_scaling_ablation.pdf')
+        os.makedirs(os.path.join(out_dir, out_scene_name), exist_ok=True)
+        fig_save_path = os.path.join(out_dir, out_scene_name, f'{out_scene_name}_iter_{iteration}_lr_scaling_ablation.pdf')
         fig.savefig(fig_save_path)
         fig.savefig(fig_save_path.replace('.pdf', '.png'))
         # if k == '_features_dc':
@@ -131,7 +132,7 @@ def plot_lr_ablation(lr_results_dict: Dict[str, Result], keys, batch_sizes, batc
 
 
 def plot_betas_ablation(adjust_betas_lr_results_dict: Dict[bool, Dict[str, Result]], keys, batch_sizes,
-                        batch_sizes_to_plot=[4, 16, 64]):
+                        out_dir, out_scene_name, iteration: int, batch_sizes_to_plot=[4, 16, 64]):
     batch_sizes_to_plot = [4, 16, 32]
     print(adjust_betas_lr_results_dict.keys())
     ncols = 2
@@ -191,8 +192,8 @@ def plot_betas_ablation(adjust_betas_lr_results_dict: Dict[bool, Dict[str, Resul
             # fig.suptitle(
             #     f'Scene: {scene_name}. Checkpoint {checkpoint_iter}. Rescale betas: {rescale_betas}{disable_momentum_str}. LR scaling: {lr_scaling}. Warmup: {warmup_epochs} epochs. IID {iid_sampling}. Params: {k}')
         # fig.tight_layout()
-        os.makedirs(os.path.join('paper_figures', 'rubble'), exist_ok=True)
-        fig_save_path = os.path.join('paper_figures', 'rubble', 'rubble_momentum_ablation.pdf')
+        os.makedirs(os.path.join(out_dir, out_scene_name), exist_ok=True)
+        fig_save_path = os.path.join(out_dir, out_scene_name, f'{out_scene_name}_iter_{iteration}_momentum_ablation.pdf')
         fig.savefig(fig_save_path)
         fig.savefig(fig_save_path.replace('.pdf', '.png'))
         # if k == '_features_dc':
@@ -200,7 +201,7 @@ def plot_betas_ablation(adjust_betas_lr_results_dict: Dict[bool, Dict[str, Resul
         plt.close(fig)
 
 
-def plot_cosine_similarity(pts_dir):
+def plot_cosine_similarity(pts_dir, out_dir):
     matplotlib.rcParams.update({'legend.frameon': True})
     matplotlib.rcParams.update({'legend.fancybox': True})
     max_batch_size = 64
@@ -216,7 +217,6 @@ def plot_cosine_similarity(pts_dir):
         iters_list = d['iters_list']
         sampling = d['sampling']
 
-        scene_name = 'rubble'
         for k in keys:
             ncols = 3
             fig, ax = plt.subplots(1, ncols, figsize=(8 * ncols, 8), dpi=300)
@@ -243,15 +243,15 @@ def plot_cosine_similarity(pts_dir):
             fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(0.5, -0.0), ncol=3, fancybox=True,
                        shadow=True, fontsize=18)
 
-            os.makedirs(os.path.join('plots_snr', scene_name), exist_ok=True)
-            fig_save_path = os.path.join('plots_snr', scene_name,
+            os.makedirs(os.path.join(out_dir, scene_name), exist_ok=True)
+            fig_save_path = os.path.join(out_dir, scene_name,
                                          f'scene_{scene_name}_param_{k.replace("_", "")}_sampling_{sampling}_trials_{num_trials}.pdf')
             fig.savefig(fig_save_path)
             # fig.show()
             plt.close(fig)
 
 
-def plot(pts_dir):
+def plot(pts_dir, out_dir):
     cosines_checkpoint = []
     test_losses_checkpoint = []
     norms_checkpoint = []
@@ -262,7 +262,8 @@ def plot(pts_dir):
         d = torch.load(pt_file)
         keys = list(d['keys'])
         assert keys == param_keys
-        checkpoint_iter = d['checkpoint_iter']
+        scene_name = d['scene_name']
+        checkpoint_iter = int(d['checkpoint_iter'])
         batch_sizes: list = d['batch_sizes']
         assert batch_sizes == plot_batch_sizes
         rescale_betas = d['rescale_betas']
@@ -278,13 +279,12 @@ def plot(pts_dir):
         # for k, batch_size in enumerate(batch_sizes):
         for_iteration[checkpoint_iter][disable_momentum][iid_sampling][rescale_betas][lr_scaling] = (
             Result(d['cosines_checkpoint'], d['test_losses_checkpoint'], d['norms_checkpoint']))
-
-    plot_lr_ablation(for_iteration[15000][False][False][True], param_keys, batch_sizes)
-    plot_betas_ablation(for_iteration[15000][False][False], param_keys, batch_sizes)
+    for iter in for_iteration.keys():
+        plot_lr_ablation(for_iteration[iter][False][False][True], param_keys, batch_sizes, out_dir, scene_name, iter)
+        plot_betas_ablation(for_iteration[iter][False][False], param_keys, batch_sizes, out_dir, scene_name, iter)
 
 
 
 if __name__ == '__main__':
-    pts_dir = './plots_grad_delta_new/rubble'
-    plot(pts_dir)
-    plot_cosine_similarity('./plots_snr/rubble-full-batch')
+    plot('./plots_grad_delta_new/combined', './paper_figures')
+    # plot_cosine_similarity('./plots_snr_radam/combined', './paper_figures_radam/')

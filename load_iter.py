@@ -276,8 +276,8 @@ def plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe,
                          'Batch size', '1/(Avg Parameter Variance)', xscale='linear', legend_labels='iter ' + str(iter))
         # fig.suptitle(f'Scene: {scene_name}. Param group: {k.replace("_", "")}.')
         fig.tight_layout()
-        os.makedirs(os.path.join('plots_snr', scene_name), exist_ok=True)
-        fig_save_path = os.path.join('plots_snr', scene_name, f'scene_{scene_name}_param_{k.replace("_", "")}_sampling_{sampling}_trials_{num_trials}.pdf')
+        os.makedirs(os.path.join('plots_snr_radam', scene_name), exist_ok=True)
+        fig_save_path = os.path.join('plots_snr_radam', scene_name, f'scene_{scene_name}_param_{k.replace("_", "")}_sampling_{sampling}_trials_{num_trials}.pdf')
         fig.savefig(fig_save_path)
         torch.save(save_dict, (fig_save_path.rstrip('.pdf') + '.pt'))
         fig.show()
@@ -492,8 +492,8 @@ def plot_weight_deltas_cosine_norm_loss(cosines, losses, norms, keys, checkpoint
         fig.suptitle(
             f'Scene: {scene_name}. Checkpoint {checkpoint_iter}. Rescale betas: {rescale_betas}{disable_momentum_str}. LR scaling: {lr_scaling}. Warmup: {warmup_epochs} epochs. IID {iid_sampling}. Params: {k}')
         fig.tight_layout()
-        os.makedirs(os.path.join('plots_grad_delta_new', scene_name), exist_ok=True)
-        fig_save_path = os.path.join('plots_grad_delta_new', scene_name,
+        os.makedirs(os.path.join('plots_grad_delta_new_radam', scene_name), exist_ok=True)
+        fig_save_path = os.path.join('plots_grad_delta_new_radam', scene_name,
                                  f'scene_{scene_name}_checkpoint_{checkpoint_iter}_param_{k.replace("_", "")}'
                                  f'_rescale_betas_{rescale_betas}{disable_momentum_str.replace(" ", "_")}_lr_{lr_scaling}_warmup_{warmup_epochs}_iid_{iid_sampling}_test_losses.pdf')
         fig.savefig(fig_save_path)
@@ -567,11 +567,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # quit()
 
     #['random', 'random_wo_replacement']
-    plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe, checkpoint, keys, num_trials=32, sampling='random_wo_replacement')
-    quit()
+    # plot_variance_sparsity_cosine(dataset, opt, train_cameras, background, pipe, checkpoint, keys, num_trials=32, sampling='random_wo_replacement')
+    # quit()
 
     # Run all experiments for first checkpoint first, then for second
     for checkpoints_list in [[7000], [15000], [30000]]:
+    # for checkpoints_list in [[15000]]:
         batch_sizes = [1, 4, 8, 16, 32, 64]
         run_epochs = 4
         # Optimal Defaults
